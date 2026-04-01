@@ -1,16 +1,127 @@
 import jsonpickle
 import json
 from typing import NamedTuple
-from copy import deepcopy
-from collections import defaultdict
-from datamodel import TradingState, Order, OrderDepth, Trade
-from sortedcontainers import SortedKeyList
+from datamodel import TradingState, Order, OrderDepth, Trade, Listing, Observation
 import sys
 import os
 import io
 import contextlib
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
 
-PRODUCTS = ["EMERALDS", "TOMATOES"]
+LISTINGS = {
+    "EMERALDS": Listing(
+        symbol="EMERALDS",
+        product="EMERALDS",
+        denomination="1"
+    ),
+    "TOMATOES": Listing(
+        symbol="TOMATOES",
+        product="TOMATOES",
+        denomination="1"
+    ),
+}
+
+def load_trading_states_from_data(min_timestamp = 0, max_timestamp = np.inf):
+    """
+    Loads a list of TradingStates from provided data files.
+    """
+
+    # Grab dataframes
+    price_dfs: list[pd.DataFrame] = []
+    trade_dfs: list[pd.DataFrame] = []
+    for day in [0, 1]:
+        price = pd.read_csv(f"data/price{day}.csv", sep=";")
+        price["timestamp"] = day * 1000000 + price["timestamp"]
+        price_dfs.append(price)
+    for day in [0, 1]:
+        trade = pd.read_csv(f"data/trade{day}.csv", sep=";")
+        trade["timestamp"] = day * 1000000 + trade["timestamp"]
+        trade_dfs.append(trade)
+    prices_df = pd.concat(price_dfs)
+    prices_df = prices_df[(prices_df["timestamp"] <= max_timestamp) & (prices_df["timestamp"] >= min_timestamp)]
+    trades_df = pd.concat(trade_dfs)
+    trades_df = trades_df[(trades_df["timestamp"] <= max_timestamp) & (trades_df["timestamp"] >= min_timestamp)]
+
+    trading_states: list[TradingState] = []
+
+    # Deserialize trades
+    all_trades: dict[int, dict[str, list[Trade]]] = {}
+    for _, trade in trades_df.iterrows():
+        timestamp: int = int(trade.get("timestamp")) # type: ignore
+        product: str = trade["symbol"]
+        if timestamp not in all_trades:
+            all_trades[timestamp] = {}
+        if product not in all_trades[timestamp]:
+            all_trades[timestamp][product] = []
+        buyer = trade.get("buyer", "")
+        seller = trade.get("seller", "")
+
+        all_trades[timestamp][product].append(Trade(
+            timestamp=trade.get('timestamp'), # type: ignore
+            symbol=product, # type: ignore
+            price=int(trade.get('price')), # type: ignore
+            quantity=int(trade.get('quantity')), # type: ignore
+            buyer="" if np.isnan(buyer) else buyer, # type: ignore
+            seller="" if np.isnan(seller) else seller # type: ignore
+        ))
+
+    def get_buy_orders(row: pd.Series):
+        buy_orders = {}
+        for number in [1, 2, 3]:
+            if np.isnan(row[f"bid_price_{number}"]):
+                continue
+            price = int(row[f"bid_price_{number}"])
+            quantity = int(row[f"bid_volume_{number}"])
+            buy_orders[price] = quantity
+        return buy_orders
+
+    def get_sell_orders(row: pd.Series):
+        sell_orders = {}
+        for number in [1, 2, 3]:
+            if np.isnan(row[f"ask_price_{number}"]):
+                continue
+            price = int(row[f"ask_price_{number}"])
+            quantity = int(row[f"ask_volume_{number}"])
+            sell_orders[price] = -quantity
+        return sell_orders
+
+    # Deserialize prices
+    for timestamp, rows in tqdm(prices_df.groupby("timestamp"), total=prices_df["timestamp"].nunique(), desc="Generating Trading States"): # type: ignore
+        books = {product: rows[rows.get("product", "") == product].iloc[0] for product in LISTINGS.keys()}
+        trades_now = all_trades.get(timestamp, {})
+
+        order_depths = {}
+        for product, book in books.items():
+            order_depth = OrderDepth()
+            order_depth.buy_orders = get_buy_orders(book)
+            order_depth.sell_orders = get_sell_orders(book)
+            order_depths[product] = order_depth
+        
+        own_trades = {}
+
+        market_trades = {}
+        for product, trades in trades_now.items():
+            if product not in market_trades:
+                market_trades[product] = []
+            for trade in trades:
+                market_trades[product].append(trade)
+        
+        position = {}
+        
+        trading_states.append(TradingState(
+            traderData="",
+            timestamp=timestamp,
+            listings=LISTINGS,
+            order_depths=order_depths,
+            own_trades=own_trades,
+            market_trades=market_trades,
+            position=position,
+            observations=Observation(plainValueObservations={},conversionObservations={})
+        ))
+    
+    return sorted(trading_states, key=lambda s: s.timestamp)
 
 def pretty(obj, indent=0):
     """Usage: print(pretty(stuff))"""
@@ -98,9 +209,9 @@ class TraderLog(NamedTuple):
     state: TradingState
     orders: dict[str, list[Order]]
 
-def get_trader_logs(log_id):
+def get_log_strings(log_id) -> dict[int, str]:
     """
-    Gets a list of TraderLogs by log id from the logs/ folder.
+    Gets a list of log strings by log id from the logs/ folder.
 
     Usage: download a testing run in the prosperity dashboard, unzip it, and put the unzipped folder in a folder named "logs". Use the folder name (eg. 33608) as the log_id.
     """
@@ -109,278 +220,36 @@ def get_trader_logs(log_id):
         content = f.read()
         lambda_logs: dict[str, object] = jsonpickle.loads(content) # type: ignore
         raw_logs: list[dict[str, str]] = lambda_logs["logs"] # type: ignore
-        print("rejected" in content.lower())
     
     with open(f"logs/{log_id}/{log_id}.json") as f:
         content = f.read()
-        print("rejected" in content.lower())
 
+    return {int(log["timestamp"]): log["lambdaLog"] for log in raw_logs}
 
+def parse_log_strings(raw_logs: dict[int, str]) -> dict[int, TraderLog]:
+    """
+    Parses a dict from timestamp to log string into a dict fro timestamp to TraderLog.
+    """
     logs: dict[int, TraderLog] = {}
-    for log in raw_logs:
-        user_log = log["lambdaLog"]
-
-        if user_log.startswith("[ERROR]"):
-            sys.exit(pretty(json.loads(user_log[user_log.index("\\n")+2:])))
+    for _, log in raw_logs.items():
+        if log.startswith("[ERROR]"):
+            sys.exit(pretty(json.loads(log[log.index("\\n")+2:])))
         
         try:
-            user_log = jsonpickle.loads(user_log) # type: ignore
-            state: TradingState = user_log['state'] # type: ignore
-            orders: dict[str, list[Order]] = user_log['orders'] # type: ignore
+            log = jsonpickle.loads(log) # type: ignore
+            state: TradingState = log['state'] # type: ignore
+            orders: dict[str, list[Order]] = log['orders'] # type: ignore
 
             logs[state.timestamp] = TraderLog(
                 state=correct_state(state), 
                 orders=orders
             )
         except Exception:
-            sys.exit(str(user_log))
+            sys.exit(str(log))
 
     return logs
 
-# fill behavior
-# highlight your orders
-
-class Book:
-    """Pretty much useless given the new trading model, where the bots submit new orders after your orders get cancelled. Should make a new one to incorporate that."""
-
-    def __init__(self):
-        """Creates a book, no arguments needed"""
-
-        self.bid_ps = SortedKeyList([], key=lambda t: -t)
-        self.bid_qs = {}
-        self.bot_tot_bid_qs = defaultdict(int)
-        self.my_tot_bid_qs = defaultdict(int)
-        self.my_bid_qs = {}
-
-        self.ask_ps = SortedKeyList([], key=lambda t: t)
-        self.ask_qs = {}
-        self.bot_tot_ask_qs = defaultdict(int)
-        self.my_tot_ask_qs = defaultdict(int)
-        self.my_ask_qs = {}
-
-        self.position = 0
-    
-    def add_bot_trades(self, trades: list[Trade]):
-        """Adds provided trades as bot trades to the current book."""
-        for t in trades:
-            self.bot_tot_bid_qs[t.price] += t.quantity
-            self.bot_tot_ask_qs[t.price] -= t.quantity
-        
-        return deepcopy(self)
-
-    def set_bot_order_depth(self, order_depth: OrderDepth):
-        """Sets bot book without affecting my orders. Throws error when a trade is detected."""
-        bid_ps = SortedKeyList(set(order_depth.buy_orders.keys()) | set(self.my_bid_qs.keys()), key=lambda t: -t)
-        ask_ps = SortedKeyList(set(order_depth.sell_orders.keys()) | set(self.my_ask_qs.keys()), key=lambda t: t)
-        if bid_ps[0] >= ask_ps[0]:
-            sys.exit(f"Trades detected: order_depth: {({**order_depth.buy_orders, **order_depth.sell_orders})}, my_bid_qs: {self.my_bid_qs}, my_ask_qs: {self.my_ask_qs}")
-        qs = {**order_depth.buy_orders, **order_depth.sell_orders}
-        self.bid_qs = {}
-        self.ask_qs = {}
-        for p in bid_ps:
-            self.bid_qs[p] = self.my_bid_qs.get(p, 0) + qs.get(p, 0)
-        for p in ask_ps:
-            self.ask_qs[p] = self.my_ask_qs.get(p, 0) + qs.get(p, 0)
-        self.bid_ps = bid_ps
-        self.ask_ps = ask_ps
-
-        return deepcopy(self)
-
-    def add_my_trades(self, trades: list[Trade]):
-        """Adds my trades to the current book."""
-
-        for t in trades:
-            trade_quantity = -t.quantity if t.seller == "SUBMISSION" else t.quantity
-
-            if t.price in self.my_bid_qs: # i bought from the bot
-                self.bid_qs[t.price] -= trade_quantity
-                self.bot_tot_ask_qs[t.price] -= trade_quantity
-                self.my_tot_bid_qs[t.price] += trade_quantity
-                self.my_bid_qs[t.price] -= trade_quantity
-                self.position += t.price
-                if self.my_bid_qs[t.price] < 0:
-                    raise Exception("Invalid trades.")
-                if self.bid_qs[t.price] < 0:
-                    raise Exception("Invalid trades.")
-                if self.my_bid_qs[t.price] == 0:
-                    del self.my_bid_qs[t.price]
-                if self.bid_qs[t.price] == 0:
-                    self.bid_ps.remove(t.price)
-            if t.price in self.my_ask_qs: # i'm selling
-                self.ask_qs[t.price] -= trade_quantity
-                self.bot_tot_bid_qs[t.price] -= trade_quantity
-                self.my_tot_ask_qs[t.price] += trade_quantity
-                self.my_ask_qs[t.price] -= trade_quantity
-                self.position += trade_quantity
-                if self.my_ask_qs[t.price] > 0:
-                    raise Exception("Invalid trades.")
-                if self.ask_qs[t.price] > 0:
-                    raise Exception("Invalid trades.")
-                if self.my_ask_qs[t.price] == 0:
-                    del self.my_ask_qs[t.price]
-                if self.ask_qs[t.price] == 0:
-                    self.ask_ps.remove(t.price)
-
-        return deepcopy(self)
-    
-    def add_my_orders(self, orders: list[Order], timestamp: int):
-        """Adds my orders to the current book."""
-
-        my_trades: list[Trade] = []
-
-        for order in orders:
-            q = order.quantity
-            while q > 0 and len(self.ask_ps) and self.ask_ps[0] <= order.price: # i'm buying
-                p: int = self.ask_ps[0] # type: ignore
-                left = q + self.ask_qs[p]
-                if left < 0:
-                    self.my_tot_bid_qs[p] += q
-                    self.position += q
-                    my_trades.append(Trade(
-                        symbol=order.symbol,
-                        price=p,
-                        quantity=q,
-                        buyer="SUBMISSION",
-                        seller="",
-                        timestamp=timestamp
-                    ))
-                    self.ask_qs[p] = left
-                    q = 0
-                else:
-                    self.my_tot_bid_qs[p] -= self.ask_qs[p]
-                    self.position -= self.ask_qs[p]
-                    my_trades.append(Trade(
-                        symbol=order.symbol,
-                        price=p,
-                        quantity=-self.ask_qs[p],
-                        buyer="SUBMISSION",
-                        seller="",
-                        timestamp=timestamp
-                    ))
-                    del self.ask_qs[p]
-                    self.ask_ps.remove(p)
-                    q = left
-            
-            while q < 0 and len(self.bid_ps) and self.bid_ps[0] >= order.price: # i'm selling
-                p: int = self.bid_ps[0] # type: ignore
-                left = q + self.bid_qs[p]
-                if left > 0:
-                    self.my_tot_ask_qs[p] += q
-                    self.position += q
-                    my_trades.append(Trade(
-                        symbol=order.symbol,
-                        price=p,
-                        quantity=-q,
-                        buyer="",
-                        seller="SUBMISSION",
-                        timestamp=timestamp
-                    ))
-                    self.bid_qs[p] = left
-                    q = 0
-                else:
-                    self.my_tot_ask_qs[p] -= self.bid_qs[p]
-                    self.position -= self.bid_qs[p]
-                    my_trades.append(Trade(
-                        symbol=order.symbol,
-                        price=p,
-                        quantity=self.bid_qs[p],
-                        buyer="",
-                        seller="SUBMISSION",
-                        timestamp=timestamp
-                    ))
-                    del self.bid_qs[p]
-                    self.bid_ps.remove(p)
-                    q = left
-
-            if q > 0:
-                if order.price in self.bid_qs:
-                    self.bid_qs[order.price] += q
-                else:
-                    self.bid_ps.add(order.price)
-                    self.bid_qs[order.price] = q
-                if order.price in self.my_bid_qs:
-                    self.my_bid_qs[order.price] += q
-                else:
-                    self.my_bid_qs[order.price] = q
-            if q < 0:
-                if order.price in self.ask_qs:
-                    self.ask_qs[order.price] += q
-                else:
-                    self.ask_ps.add(order.price)
-                    self.ask_qs[order.price] = q
-                if order.price in self.my_ask_qs:
-                    self.my_ask_qs[order.price] += q
-                else:
-                    self.my_ask_qs[order.price] = q
-                
-        return deepcopy(self), my_trades
-    
-    def cancel_my_open_orders(self):
-        """Remove my open orders from the book. Throw an error if there is insufficient quantity"""
-
-        # cancelled_orders = []
-
-        for p, q in self.my_bid_qs.items():
-            self.bid_qs[p] -= q
-            # cancelled_orders.append(T(p, q))
-            if self.bid_qs[p] < 0:
-                raise Exception("Open orders larger than current orders on book.")
-            if self.bid_qs[p] == 0:
-                del self.bid_qs[p]
-                self.bid_ps.remove(p)
-        for p, q in self.my_ask_qs.items():
-            self.ask_qs[p] -= q
-            # cancelled_orders.append(T(p, q))
-            if self.ask_qs[p] > 0:
-                raise Exception("Open orders larger than current orders on book.")
-            if self.ask_qs[p] == 0:
-                del self.ask_qs[p]
-                self.ask_ps.remove(p)
-        
-        self.my_bid_qs.clear()
-        self.my_ask_qs.clear()
-        
-        return deepcopy(self)
-        
-    def get_bids(self):
-        """Returns the bids on book as a list of (price, quantity) tuples."""
-
-        return [(p, self.bid_qs[p]) for p in self.bid_ps]
-    
-    def get_asks(self):
-        """Returns the bids on book as a list of (price, quantity) tuples."""
-
-        return [(p, self.ask_qs[p]) for p in self.ask_ps]
-
-    def __repr__(self):
-        """Stringify, shows the orderbook."""
-
-        return str(list(reversed(self.get_bids()))) + " || " + str(self.get_asks())
-
-def get_remaining_orders(product: str, orders: list[Order], trades: list[Trade]):
-    """Returns orders - trades."""
-
-    qs = {}
-    for order in orders:
-        if order.price not in qs:
-            qs[order.price] = 0
-        qs[order.price] += order.quantity
-    for trade in trades:
-        qs[trade.price] -= trade.quantity
-    return [Order(symbol=product, price=p, quantity=q) for p, q in qs.items() if q != 0]
-
-def get_my_makes(my_trades: list[Trade], my_takes: list[Trade]):
-    """Returns my_trades - my_takes."""
-
-    trade_tuples1 = {(trade.buyer, trade.seller, trade.price, trade.quantity, trade.timestamp, trade.symbol) for trade in my_trades}
-    trade_tuples2 = {(trade.buyer, trade.seller, trade.price, trade.quantity, trade.timestamp, trade.symbol) for trade in my_takes}
-    if not trade_tuples2 <= trade_tuples1:
-        sys.exit(f"My trades does not contain my takes: t={my_takes[0].timestamp}\nMy trades: {my_trades}\nMy takes: {my_takes}")
-    remaining_trade_tuples = trade_tuples1 - trade_tuples2
-    return [Trade(buyer=b, seller=s, price=p, quantity=q, timestamp=t, symbol=sb) for b, s, p, q, t, sb in remaining_trade_tuples]
-
-
-def wall_mid_formula(order_depth):
+def get_wall_mid(order_depth):
     """
     Returns the "fair price".
     
@@ -389,8 +258,7 @@ def wall_mid_formula(order_depth):
 
     return (min(order_depth.buy_orders.keys()) + max(order_depth.sell_orders.keys())) / 2
 
-
-def print_log_item(log: TraderLog, mid_price_formula=wall_mid_formula, products=PRODUCTS):
+def print_trader_log(log: TraderLog, mid_price_formula=get_wall_mid, products=list(LISTINGS.keys())):
     """
     Pretty-prints a TraderLog.
     """
@@ -434,53 +302,6 @@ def print_log_item(log: TraderLog, mid_price_formula=wall_mid_formula, products=
         if not orders:
             print(f"\tNO ORDERS POSTED")
 
-# def get_snapshots(logs: dict[int, TraderLog], product: str):
-#     """
-#     Returns a list of snapshots for visualization. Pretty much useless. 
-    
-#     Can also be used to show if bots have traded after your orders are cancelled, which is always true.
-#     """
-
-#     # This procedure is separating the trades and pushing them in. 
-#     # one potentially superior procedure is to get a list of orders for the bots and a list of orders for the trader and pushing them onto an orderbook
-#     timestamp = 0
-#     book = Book()
-#     my_orders = []
-#     my_takes = []
-#     snapshots = []
-#     while timestamp < 200000:
-#         print_log_item(logs[timestamp], wall_mid_formula)
-
-#         # yesterday...
-#         bot_trades = [t for t in logs[timestamp].state.market_trades.get(product, []) if t.timestamp == timestamp-100]
-#         my_trades = [t for t in logs[timestamp].state.own_trades.get(product, []) if t.timestamp == timestamp-100]
-#         my_makes = get_my_makes(my_trades, my_takes)
-#         my_standing_orders = get_remaining_orders(product, my_orders, my_trades)
-
-#         # bots trade on me
-#         book = book.cancel_my_open_orders()
-#         book = book.add_my_trades(my_trades)
-#         book, empty_trades = book.add_my_orders(my_standing_orders, timestamp-100)
-#         assert len(empty_trades) == 0, "adding my orders creates non-empty trades"
-
-#         # bots trade with each other
-#         order_depths = logs[timestamp].state.order_depths[product]
-#         book = book.set_bot_order_depth(order_depths)
-#         book = book.add_bot_trades(bot_trades)
-        
-#         # my orders get cancelled
-#         book = book.cancel_my_open_orders()
-
-#         # today...
-#         my_orders = logs[timestamp].orders.get(product, [])
-#         book, my_takes = book.add_my_orders(my_orders, timestamp)
-
-
-#         # snap!
-#         snapshots.append(snapshot(f"{timestamp}", book, trades=my_takes + my_makes, bot_trades=bot_trades))
-#         timestamp += 100
-#     return snapshots
-
 def capture_prints(function):
     """Pass the function inside this function to run it while having the prints captured."""
 
@@ -496,3 +317,225 @@ def clear_console():
     """
 
     os.system('cls' if os.name == 'nt' else 'clear')
+
+import heapq
+
+# TODO: implement time order
+class Quote(NamedTuple):
+    by: str
+    price: int
+    quantity: int
+
+class Match(NamedTuple):
+    buy: Quote
+    sell: Quote
+
+class QuoteHeap:
+    def __init__(self, bids_heap: bool): 
+        self.bids_heap = bids_heap
+        self.heap = []
+        self.total_size = 0
+
+    def push(self, quote: Quote):
+        price_order = -quote.price if self.bids_heap else quote.price
+        heapq.heappush(self.heap, (price_order, quote))
+        self.total_size += abs(quote.quantity)
+
+    def top(self):
+        return self.heap[0][-1]
+    
+    def pop(self) -> Quote:
+        quote = heapq.heappop(self.heap)[-1]
+        self.total_size -= abs(quote.quantity)
+        return quote
+    
+    def __bool__(self):
+        return bool(self.heap)
+
+class OrderBook:
+    def __init__(self):
+        self.buys = QuoteHeap(bids_heap=True)
+        self.sells = QuoteHeap(bids_heap=False)
+
+    def quote(self, quote: Quote) -> list[Match]:
+        matches: list[Match] = []
+
+        by, p, q = quote.by, quote.price, quote.quantity
+
+        while q > 0: # buying
+            if not self.sells:
+                self.buys.push(Quote(by, p, q)) # add buy order directly and end
+                break
+            quote_by, ap, aq = self.sells.top() # best ask
+            if ap > p: # best ask higher than our bid
+                self.buys.push(Quote(by, p, q)) # bid directly
+                break
+            if aq+q < 0: # best ask can absorb our bid
+                self.sells.pop()
+                self.sells.push(Quote(quote_by, ap, aq+q))
+                matches.append(Match(Quote(by, ap, q), Quote(quote_by, ap, -q)))
+                q = 0
+            else: # best ask falls
+                self.sells.pop()
+                matches.append(Match(Quote(by, ap, -aq), Quote(quote_by, ap, aq)))
+                q += aq
+        while q < 0: # selling
+            if not self.buys:
+                self.sells.push(Quote(by, p, q)) # add sell order directly and stop
+                break
+            quote_by, bp, bq = self.buys.top() # best bid
+            if bp < p: # best bid lower than our selling price
+                self.sells.push(Quote(by, p, q)) # add sell order directly and stop
+                break
+            if bq+q > 0: # best bid can absorb our order
+                self.buys.pop()
+                self.buys.push(Quote(quote_by, bp, bq+q))
+                matches.append(Match(Quote(quote_by, bp, -q), Quote(by, bp, q)))
+                q = 0
+            else: # best bid falls
+                self.buys.pop()
+                matches.append(Match(Quote(quote_by, bp, bq), Quote(by, bp, -bq)))
+                q += bq
+
+        return matches
+
+    def quote_without_matching(self, quote: Quote) -> None:
+        if quote.quantity > 0:
+            self.buys.push(quote)
+        if quote.quantity < 0:
+            self.sells.push(quote)
+        
+    def fill_all(self) -> list[Match]: # this is the pain and the point in implementing time ordering
+        all_filled_quotes: list[Match] = []
+
+        quotes = []
+        while self.buys:
+            quotes.append(self.buys.pop())
+        while self.sells:
+            quotes.append(self.sells.pop())
+        for quote in quotes:
+            filled_quotes = self.quote(quote)
+            for filled_quote in filled_quotes:
+                all_filled_quotes.append(filled_quote)
+
+        return all_filled_quotes
+
+class Simulation:
+    def __init__(self, state: TradingState, market_trades: dict[str, list[Trade]] = {}):
+        self.state = state
+        self.books: dict[str, OrderBook] = {}
+        for product in LISTINGS.keys():
+            book = OrderBook()
+            order_depth = self.state.order_depths.get(product, OrderDepth())
+            bids = order_depth.buy_orders
+            asks = order_depth.sell_orders
+            for p, q in bids.items():
+                filled = book.quote(Quote("", p, q))
+                assert len(filled) == 0
+            for p, q in asks.items():
+                filled = book.quote(Quote("", p, q))
+                assert len(filled) == 0
+            self.books[product] = book
+        for product, trades in market_trades.items():
+            book = self.books[product]
+            for trade in trades:
+                book.quote_without_matching(Quote(trade.buyer, trade.price, trade.quantity))
+                book.quote_without_matching(Quote(trade.seller, trade.price, -trade.quantity))
+    
+    def fill(self, order: Order):
+        matches = self.books[order.symbol].quote(Quote("SUBMISSION", order.price, order.quantity))
+        return [Trade(
+            symbol=order.symbol,
+            price=match.buy.price,
+            quantity=match.buy.quantity,
+            buyer=match.buy.by,
+            seller=match.sell.by,
+            timestamp=self.state.timestamp
+        ) for match in matches]
+
+    def get_market_trades(self):
+        """
+        Note: this is a destructive function. It destroys the orderbook, preventing it from processing further fills correctly.
+
+        We can make it non-destructive by deepcopying the orderbook, but there is no point doing that given our use case.
+        """
+        market_trades = {}
+        for product, book in self.books.items():
+            matches = book.fill_all()
+            market_trades[product] = [Trade(
+                symbol=product,
+                price=match.buy.price,
+                quantity=match.buy.quantity,
+                buyer=match.buy.by,
+                seller=match.sell.by,
+                timestamp=self.state.timestamp
+            ) for match in matches]
+        return market_trades
+
+def backtest(trader) -> tuple[dict[int, int], dict[int, TraderLog]]:
+    """
+    Backtests a trader.
+
+    TODO: support conversions in backtester.
+    """
+
+    try:
+        with open("trading_states.cache") as f:
+            trading_states: list[TradingState] = [correct_state(s) for s in jsonpickle.loads(f.read())] # type: ignore
+    except FileNotFoundError:
+        trading_states: list[TradingState] = load_trading_states_from_data()
+        with open("trading_states.cache", "w") as f:
+            f.write(jsonpickle.dumps(trading_states)) # type: ignore
+
+    pnls = {}
+    all_logs = {}
+
+    if not trading_states:
+        return pnls, all_logs
+
+    cash = 0
+    state = trading_states[0]
+    for i in tqdm(range(len(trading_states)), desc="Running Backtest"):
+        is_last_day = i+1 == len(trading_states)
+        next_market_trades = {} if is_last_day else trading_states[i+1].market_trades
+        
+        product_values = {}
+        for product, order_depths in state.order_depths.items():
+            product_values[product] = get_wall_mid(order_depths)
+
+        sim = Simulation(state, market_trades=next_market_trades)
+        positions = state.position
+        own_trades = {}
+        (all_orders, _, traderData), logs = capture_prints(lambda: trader.run(state))
+        all_logs[state.timestamp] = logs
+        for product, orders in all_orders.items():
+            for order in orders:
+                trades = sim.fill(order)
+                for trade in trades:
+                    if product not in own_trades:
+                        own_trades[product] = []
+                    own_trades[product].append(trade)
+                    multiplier = 1 if trade.buyer == "SUBMISSION" else -1
+                    if product not in positions:
+                        positions[product] = 0
+                    positions[product] += trade.quantity * multiplier
+                    cash -= trade.price * trade.quantity * multiplier
+        position_value = 0
+        for product, position in positions.items():
+            position_value += product_values[product] * position
+        pnls[state.timestamp] = cash + position_value
+
+        if not is_last_day:
+            state = TradingState(
+                traderData=traderData,
+                timestamp=trading_states[i+1].timestamp,
+                listings=LISTINGS,
+                order_depths=trading_states[i+1].order_depths,
+                own_trades=own_trades,
+                market_trades=sim.get_market_trades(),
+                position=positions,
+                observations=Observation(plainValueObservations={}, conversionObservations={})
+            )
+    
+    all_logs = parse_log_strings(all_logs)
+    return pnls, all_logs
