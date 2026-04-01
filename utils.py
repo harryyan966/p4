@@ -459,20 +459,20 @@ def get_trading_states_from_cache(cache_file):
         trading_states: list[TradingState] = [correct_state(s) for s in jsonpickle.loads(f.read())] # type: ignore
     return trading_states
 
-def backtest(trader, trading_states: list[TradingState]) -> tuple[dict[int, int], dict[int, TraderLog]]:
+def backtest(trader, trading_states: list[TradingState]) -> tuple[dict[str, dict[int, int]], dict[int, TraderLog]]:
     """
     Backtests a trader.
 
     TODO: support conversions in backtester.
     """
 
-    pnls = {}
+    pnls = {p: {} for p in LISTINGS.keys()}
     all_logs = {}
 
     if not trading_states:
         return pnls, all_logs
 
-    cash = 0
+    cash = {p: 0 for p in LISTINGS.keys()}
     state = trading_states[0]
     for i in tqdm(range(0, len(trading_states)), desc="Running Backtest"):
         is_last_day = i+1 == len(trading_states)
@@ -495,7 +495,7 @@ def backtest(trader, trading_states: list[TradingState]) -> tuple[dict[int, int]
                 all_trades += sim.fill(Order(symbol=product, price=market_trade.price, quantity=market_trade.quantity), market_trade.buyer)
                 all_trades += sim.fill(Order(symbol=product, price=market_trade.price, quantity=-market_trade.quantity), market_trade.seller)
 
-        # Accumulate All Trades to Own Trades and Market Trades
+        # Calculate Own Trades and Market Trades
         own_trades = {product: [] for product in LISTINGS.keys()}
         market_trades = {product: [] for product in LISTINGS.keys()}
         positions = {product: state.position.get(product, 0) for product in LISTINGS.keys()}
@@ -504,26 +504,21 @@ def backtest(trader, trading_states: list[TradingState]) -> tuple[dict[int, int]
             if trade.buyer == "SUBMISSION":
                 own_trades[product].append(trade)
                 positions[product] += trade.quantity
-                cash -= trade.price * trade.quantity
+                cash[product] -= trade.price * trade.quantity
             elif trade.seller == "SUBMISSION":
                 own_trades[product].append(trade)
                 positions[product] -= trade.quantity
-                cash += trade.price * trade.quantity
+                cash[product] += trade.price * trade.quantity
             else:
                 market_trades[product].append(trade)
         
-        # Calculate Product Values
-        product_values = {}
-        for product, order_depths in state.order_depths.items():
-            product_values[product] = get_wall_mid(order_depths)
-        
-        # Calculate Total Pnl
-        position_value = 0
-        for product, position in positions.items():
+        # Calculate Per-Product Pnls
+        for product in LISTINGS.keys():
+            position = positions.get(product, 0)
             if abs(position) > POSITION_LIMITS[product]:
                 sys.exit(f"Position Exceeded Limits at {state.timestamp} for {product}: {position}")
-            position_value += product_values[product] * position
-        pnls[state.timestamp] = cash + position_value
+            product_value = get_wall_mid(state.order_depths[product])
+            pnls[product][state.timestamp] = cash[product] + product_value * position
 
         # Generate Next State
         if not is_last_day:
@@ -543,26 +538,23 @@ def backtest(trader, trading_states: list[TradingState]) -> tuple[dict[int, int]
     return pnls, all_logs
 
 def get_pnls_from_trading_states(states: list[TradingState]):
-    pnls = {}
-    cash = 0
+    pnls = {p: {} for p in LISTINGS.keys()}
+    cash = {p: 0 for p in LISTINGS.keys()}
     positions = {p: 0 for p in LISTINGS.keys()}
     for state in states:
-        product_values = {}
-        for product, order_depths in state.order_depths.items():
-            product_values[product] = get_wall_mid(order_depths)
-        
+        # Update Positions
         for product, trades in state.own_trades.items():
             for trade in trades:
                 multiplier = 1 if trade.buyer == "SUBMISSION" else -1
                 positions[product] += trade.quantity * multiplier
-                cash -= trade.price * trade.quantity * multiplier
-            
-        position_value = 0
-        for product, position in positions.items():
+                cash[product] -= trade.price * trade.quantity * multiplier
+        
+        # Calculate Pnl
+        for product in LISTINGS.keys():
+            position = positions.get(product, 0)
             if abs(position) > POSITION_LIMITS[product]:
                 sys.exit(f"Position Exceeded Limits at {state.timestamp} for {product}: {position}")
-            position_value += product_values[product] * position
-        
-        pnls[state.timestamp] = cash + position_value
+            product_value = get_wall_mid(state.order_depths[product])
+            pnls[product][state.timestamp] = cash[product] + product_value * position
     
     return pnls
