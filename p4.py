@@ -46,7 +46,8 @@ class Orderer:
 
     def sell(self, p, q):
         """Pass a positive q"""
-        # remaining_quota = self.position_limit + self.position - self.sells.total_size
+        remaining_quota = self.position_limit + self.position - self.sells.total_size
+        q = min(q, remaining_quota)
         # if q > remaining_quota:
         #     raise Exception("Too many sell orders. Check your logic.")
         while q:
@@ -67,7 +68,8 @@ class Orderer:
     
     def buy(self, p, q):
         """Pass a positive q"""
-        # remaining_quota = self.position_limit - self.position - self.buys.total_size
+        remaining_quota = self.position_limit - self.position - self.buys.total_size
+        q = min(q, remaining_quota)
         # if q > remaining_quota:
         #     raise Exception("Too many buy orders. Check your logic.")
         while q:
@@ -119,7 +121,7 @@ class Orderer:
         return [Order(symbol=self.product, price=p, quantity=q) for p, q in zip(bps + sps, bqs + sqs)]
 
 def trade_flat_mm(state: TradingState):
-    position = state.position.get(FLAT_MM, 0)
+    position = state.position.get(FLAT_MM, 0) # TODO: this position is static, if we do something we may doublecount
     market = Orderer(
         product=FLAT_MM,
         position_limit=80,
@@ -128,9 +130,15 @@ def trade_flat_mm(state: TradingState):
     order_depths = state.order_depths.get(FLAT_MM, OrderDepth())
     bids = sorted([(p, q) for p, q in order_depths.buy_orders.items()], reverse=True)
     asks = sorted([(p, q) for p, q in order_depths.sell_orders.items()])
-
-    # market take
     mid = (bids[-1][0] + asks[-1][0]) // 2 # TODO: verify
+    
+    # untilt position
+    if position > 20:
+        market.sell(mid, 10)
+    elif position < -20:
+        market.buy(mid, 10)
+    
+    # market take
     for bp, bq in bids: # sell to bids
         if bp > mid:
             market.sell(bp, abs(bq))
@@ -164,8 +172,14 @@ def trade_moving_mm(state: TradingState):
     asks = sorted([(p, q) for p, q in order_depths.sell_orders.items()])
     mid = (bids[-1][0] + asks[-1][0]) // 2 # TODO: verify
 
+    # untilt position
+    # if position > 20:
+    #     market.sell(mid, 10)
+    # elif position < -20:
+    #     market.buy(mid, 10)
+
     # market take
-    mid -= int(position / 10) # can sell at lower price if position too positive, vice versa
+    mid -= int(position / 40) # can sell at lower price if position too positive, vice versa
     for bp, bq in bids: # sell to bids
         if bp > mid:
             market.sell(bp, abs(bq))
@@ -176,7 +190,7 @@ def trade_moving_mm(state: TradingState):
     # TODO: position tilt handling
 
     # undercut by k (TODO: try different price levels and check fill activity)
-    k = 2
+    k = 1
     for bp, bq in bids:
         if bp < mid-1:
             market.buy_rest(bp+k)
@@ -202,4 +216,3 @@ class Trader:
         }))
 
         return all_orders, 0, ""
-

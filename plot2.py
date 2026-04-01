@@ -1,11 +1,18 @@
 from utils import *
+from p4 import Trader
 
-product = "EMERALDS"
-# logs = get_trader_logs("33608") # bots
-logs = get_trader_logs("33862") # mine
-states = [get_relevant_state(log.state) for _, log in sorted(logs.items())]
+# TODO: get pnl from each trade??
 
-
+product = "TOMATOES"
+# bt_states = get_trading_states_from_log("33608")
+# bt_states = get_trading_states_from_data()
+# assert len([trade for state in bt_states for trades in state.own_trades.values() for trade in trades]) == 0, "There are own trades" # TODO: incorporate own trades
+# pnls, logs = backtest(Trader(), bt_states) # mine
+# states = [log.state for log in logs.values()]
+# print(max(pnls.items()))
+# print(len(bt_states))
+states = get_trading_states_from_log("39231")
+pnls = get_pnls_from_trading_states(states)
 
 def get_mid(state: TradingState):
     b = min(state.order_depths[product].buy_orders.keys())
@@ -35,23 +42,11 @@ def get_middle_orders(state: TradingState):
 def get_mid_size(state: TradingState):
     return sum([o[2] for o in get_middle_orders(state)])
 
-def significant(state: TradingState, quote_size: int):
-    b = sorted(state.order_depths[product].buy_orders.items())[2:]
-    s = sorted(state.order_depths[product].sell_orders.items())[:-2]
-    for _, q in b + s:
-        if abs(q) == quote_size:
-            return q
-    return 0
-
 
 
 import matplotlib.pyplot as plt
 
-fig, ax = plt.subplots(1, 1, figsize=(30,10), dpi=300)
-ax = [ax]
-plt.title("tit3")
-
-
+fig, ax = plt.subplots(3, 1, figsize=(30,30), dpi=200)
 
 ax[0].plot(
     [s.timestamp for s in states],
@@ -70,15 +65,6 @@ ax[0].plot(
     color="green"
 )
 
-# p = 5
-# ax[0].scatter(
-#     [s.timestamp for s in states if significant(s, p)],
-#     [get_mid(s) for s in states if significant(s, p)],
-#     s=p * 50,
-#     c=["green" if significant(s, p) > 0 else "red" for s in states if significant(s, p)],
-#     marker="o"
-# )
-
 trades = sum([s.own_trades.get(product, []) for s in states], [])
 # trades = [t for t in trades if t.quantity == 5]
 
@@ -89,9 +75,6 @@ ax[0].scatter(
     c = ["green" if t.buyer == "" else "red" for t in trades],
     marker = "o"
 )
-
-print([(t.timestamp, t.quantity if t.buyer == "" else -t.quantity) for t in trades])
-print()
 
 middle_orders = []
 for s in states:
@@ -108,7 +91,7 @@ ax[0].scatter(
     edgecolors = ["green" if x[2] > 0 else "red" for x in middle_orders],
 )
 
-print([(x[0], x[2]) for x in middle_orders])
+# print([(x[0], x[2]) for x in middle_orders])
 
 bot_trades = sum([s.market_trades.get(product, []) for s in states], [])
 # bot_trades = [t for t in bot_trades if t.quantity == 5]
@@ -119,6 +102,16 @@ ax[0].scatter(
     s = [abs(t.quantity) * 50 for t in bot_trades],
     c = "blue",
     marker = "x"
+)
+
+ax[1].plot(
+    [s.timestamp for s in states],
+    [s.position.get(product, 0) for s in states]
+)
+
+ax[2].plot(
+    [t.timestamp for t in states],
+    [pnls[t.timestamp] for t in states]
 )
 
 # colors = {0: "red", 1: "orange", 2: "brown", 3: "green", 4: "blue", 5: "indigo", 6: "violet"}

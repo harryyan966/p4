@@ -2,7 +2,7 @@
 from utils import *
 
 product = "TOMATOES"
-logs = get_trader_logs("33608")
+logs = parse_log_strings(get_log_strings("33608"))
 states = [get_relevant_state(log.state) for _, log in sorted(logs.items())]
 def get_mid(state: TradingState):
     b = min(state.order_depths[product].buy_orders.keys())
