@@ -1,0 +1,7 @@
+{
+    "reportUnusedVariable": "none",
+    "reportOperatorIssue": "none",
+    // "typeCheckingMode": "off",
+    "typeCheckingMode": "standard"
+    // "typeCheckingMode": "strict"
+}
