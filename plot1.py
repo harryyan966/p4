@@ -27,7 +27,6 @@ ax[0].scatter(
     marker="o"
 )
 
-
 def get_mid_size(state: TradingState):
     b = sorted(state.order_depths[product].buy_orders.items())[2:]
     s = sorted(state.order_depths[product].sell_orders.items())[:-2]

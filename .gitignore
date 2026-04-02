@@ -6,3 +6,4 @@ trash/
 __pycache__/
 .DS_Store
 cache/
+*.lprof

@@ -1,7 +1,6 @@
-import jsonpickle
 import json
 from typing import NamedTuple
-from datamodel import TradingState, Order, OrderDepth, Trade, Listing, Observation
+from datamodel import TradingState, Order, OrderDepth, Trade, Listing, Observation, ConversionObservation
 import sys
 import os
 import io
@@ -10,6 +9,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from copy import deepcopy
+from collections import deque
 
 LISTINGS = {
     "EMERALDS": Listing(
@@ -224,7 +224,7 @@ def get_log_strings(log_id) -> dict[int, str]:
 
     with open(f"logs/{log_id}/{log_id}.log") as f:
         content = f.read()
-        lambda_logs: dict[str, object] = jsonpickle.loads(content) # type: ignore
+        lambda_logs: dict[str, object] = json.loads(content)
         raw_logs: list[dict[str, str]] = lambda_logs["logs"] # type: ignore
     
     with open(f"logs/{log_id}/{log_id}.json") as f:
@@ -242,16 +242,16 @@ def parse_log_strings(raw_logs: dict[int, str]) -> dict[int, TraderLog]:
             sys.exit(pretty(json.loads(log[log.index("\\n")+2:])))
         
         try:
-            log = jsonpickle.loads(log) # type: ignore
-            state: TradingState = log['state'] # type: ignore
-            orders: dict[str, list[Order]] = log['orders'] # type: ignore
+            log = json.loads(log, cls=MyP4Decoder)
+            state: TradingState = log['state']
+            orders: dict[str, list[Order]] = log['orders']
 
             logs[state.timestamp] = TraderLog(
                 state=correct_state(state), 
                 orders=orders
             )
         except Exception:
-            sys.exit(str(log))
+            sys.exit(f"Error Parsing log: {log}")
 
     return logs
 
@@ -331,20 +331,39 @@ class Quote(NamedTuple):
     by: str
     price: int
     quantity: int
+    reason: str
 
 class Match(NamedTuple):
     buy: Quote
     sell: Quote
+
+    def to_trade(self, symbol: str, timestamp: int):
+        return Trade(
+            symbol=symbol,
+            price=self.buy.price,
+            quantity=self.buy.quantity,
+            buyer=self.buy.by,
+            seller=self.sell.by,
+            timestamp=timestamp
+        )
 
 class QuoteHeap:
     def __init__(self, bids_heap: bool): 
         self.bids_heap = bids_heap
         self.heap = []
         self.total_size = 0
+        self.counter = 0
 
     def push(self, quote: Quote):
         price_order = -quote.price if self.bids_heap else quote.price
-        heapq.heappush(self.heap, (price_order, quote))
+        heapq.heappush(self.heap, (price_order, self.counter, quote))
+        self.counter += 1
+        self.total_size += abs(quote.quantity)
+    
+    def replace_top(self, quote: Quote):
+        price_order, counter, old_quote = heapq.heappop(self.heap)
+        self.total_size -= abs(old_quote.quantity)
+        heapq.heappush(self.heap, (price_order, counter, quote))
         self.total_size += abs(quote.quantity)
 
     def top(self):
@@ -366,41 +385,39 @@ class OrderBook:
     def quote(self, quote: Quote) -> list[Match]:
         matches: list[Match] = []
 
-        by, p, q = quote.by, quote.price, quote.quantity
+        by, p, q, r = quote.by, quote.price, quote.quantity, quote.reason
 
         while q > 0: # buying
             if not self.sells:
-                self.buys.push(Quote(by, p, q)) # add buy order directly and end
+                self.buys.push(Quote(by, p, q, r)) # add buy order directly and end
                 break
-            quote_by, ap, aq = self.sells.top() # best ask
+            quote_by, ap, aq, ar = self.sells.top() # best ask
             if ap > p: # best ask higher than our bid
-                self.buys.push(Quote(by, p, q)) # bid directly
+                self.buys.push(Quote(by, p, q, r)) # bid directly
                 break
             if aq+q < 0: # best ask can absorb our bid
-                self.sells.pop()
-                self.sells.push(Quote(quote_by, ap, aq+q))
-                matches.append(Match(Quote(by, ap, q), Quote(quote_by, ap, -q)))
+                self.sells.replace_top(Quote(quote_by, ap, aq+q, ar))
+                matches.append(Match(Quote(by, ap, q, r), Quote(quote_by, ap, -q, ar)))
                 q = 0
             else: # best ask falls
                 self.sells.pop()
-                matches.append(Match(Quote(by, ap, -aq), Quote(quote_by, ap, aq)))
+                matches.append(Match(Quote(by, ap, -aq, r), Quote(quote_by, ap, aq, ar)))
                 q += aq
         while q < 0: # selling
             if not self.buys:
-                self.sells.push(Quote(by, p, q)) # add sell order directly and stop
+                self.sells.push(Quote(by, p, q, r)) # add sell order directly and stop
                 break
-            quote_by, bp, bq = self.buys.top() # best bid
+            quote_by, bp, bq, br = self.buys.top() # best bid
             if bp < p: # best bid lower than our selling price
-                self.sells.push(Quote(by, p, q)) # add sell order directly and stop
+                self.sells.push(Quote(by, p, q, r)) # add sell order directly and stop
                 break
             if bq+q > 0: # best bid can absorb our order
-                self.buys.pop()
-                self.buys.push(Quote(quote_by, bp, bq+q))
-                matches.append(Match(Quote(quote_by, bp, -q), Quote(by, bp, q)))
+                self.buys.replace_top(Quote(quote_by, bp, bq+q, br))
+                matches.append(Match(Quote(quote_by, bp, -q, br), Quote(by, bp, q, r)))
                 q = 0
             else: # best bid falls
                 self.buys.pop()
-                matches.append(Match(Quote(quote_by, bp, bq), Quote(by, bp, -bq)))
+                matches.append(Match(Quote(quote_by, bp, bq, br), Quote(by, bp, -bq, r)))
                 q += bq
 
         return matches
@@ -413,41 +430,32 @@ class OrderBook:
         
 class Simulation:
     def __init__(self, state: TradingState):
-        self.state = state
         self.books: dict[str, OrderBook] = {}
         for product in LISTINGS.keys():
             book = OrderBook()
-            order_depth = self.state.order_depths.get(product, OrderDepth())
+            order_depth = state.order_depths.get(product, OrderDepth())
             bids = order_depth.buy_orders
             asks = order_depth.sell_orders
             for p, q in bids.items():
-                filled = book.quote(Quote("", p, q))
+                filled = book.quote(Quote("", p, q, ""))
                 assert len(filled) == 0
             for p, q in asks.items():
-                filled = book.quote(Quote("", p, q))
+                filled = book.quote(Quote("", p, q, ""))
                 assert len(filled) == 0
             self.books[product] = book
     
-    def fill(self, order: Order, by: str):
-        matches = self.books[order.symbol].quote(Quote(by, order.price, order.quantity))
-        return [Trade(
-            symbol=order.symbol,
-            price=match.buy.price,
-            quantity=match.buy.quantity,
-            buyer=match.buy.by,
-            seller=match.sell.by,
-            timestamp=self.state.timestamp
-        ) for match in matches]
+    def fill(self, order: Order, by: str, reason: str):
+        return self.books[order.symbol].quote(Quote(by, order.price, order.quantity, reason))
 
 def get_trading_states_from_data(min_t = 0, max_t = 9000000):
     try:
         with open(f"cache/data_trading_states{min_t}-{max_t}.cache") as f:
-            trading_states: list[TradingState] = [correct_state(s) for s in jsonpickle.loads(f.read())] # type: ignore
+            trading_states: list[TradingState] = [correct_state(s) for s in json.loads(f.read(), cls=MyP4Decoder)] # type: ignore
         return trading_states
     except FileNotFoundError:
         trading_states: list[TradingState] = [get_relevant_state(s) for s in load_trading_states_from_data(min_t, max_t)]
         with open(f"cache/data_trading_states{min_t}-{max_t}.cache", "w") as f:
-            f.write(jsonpickle.dumps(trading_states)) # type: ignore
+            f.write(json.dumps(trading_states, cls=MyP4Encoder)) # type: ignore
         return trading_states
 
 def get_trading_states_from_log(log_id):
@@ -456,74 +464,195 @@ def get_trading_states_from_log(log_id):
 
 def get_trading_states_from_cache(cache_file):
     with open(f"cache/{cache_file}.cache") as f:
-        trading_states: list[TradingState] = [correct_state(s) for s in jsonpickle.loads(f.read())] # type: ignore
+        trading_states: list[TradingState] = [correct_state(s) for s in json.loads(f.read(), cls=MyP4Decoder)] # type: ignore
     return trading_states
 
-def backtest(trader, trading_states: list[TradingState]) -> tuple[dict[str, dict[int, int]], dict[int, TraderLog]]:
+class Reaction(NamedTuple):
+    input_state: TradingState # state seen by trader
+    log: str # log string output by trader
+    trades: dict[str, list[Trade]] # map from reason to trade
+
+class MyP4Encoder(json.JSONEncoder):
+    def default(self, o):
+        d = o.__dict__.copy()
+        d["__type__"] = o.__class__.__name__  # embed the type
+        return d
+
+class MyP4Decoder(json.JSONDecoder):
+    def __init__(self):
+        super().__init__(object_hook=self.decode_object)
+    
+    def decode_object(self, d):
+        t = d.get("__type__")
+        if t == "ConversionObservation":
+            return ConversionObservation(d["bidPrice"], d["askPrice"], d["transportFees"], d["exportTariff"], d["importTariff"], d["sunlight"], d["humidity"])
+        if t == "Listing":
+            return Listing(d["symbol"], d["product"], d["denomination"])
+        if t == "Order":
+            return Order(d["symbol"], d["price"], d["quantity"])
+        if t == "Trade":
+            return Trade(d["symbol"], d["price"], d["quantity"], d["buyer"], d["seller"], d["timestamp"])
+        if t == "OrderDepth":
+            depth = OrderDepth()
+            depth.buy_orders = {int(k): v for k, v in d["buy_orders"].items()}
+            depth.sell_orders = {int(k): v for k, v in d["sell_orders"].items()}
+            return depth
+        if t == "Observation":
+            return Observation(d["plainValueObservations"], d["conversionObservations"])
+        if t == "TradingState":
+            return TradingState(d["traderData"], d["timestamp"], d["listings"], d["order_depths"], d["own_trades"], d["market_trades"], d["position"], d["observations"])
+        return d
+    
+def backtest(trader, trading_states: list[TradingState], use_local=True, use_reasons=True) -> list[Reaction]:
     """
-    Backtests a trader.
+    Backtests a trader, outputs a list of {state, log, takes, makes}
 
     TODO: support conversions in backtester.
     """
 
-    pnls = {p: {} for p in LISTINGS.keys()}
-    all_logs = {}
+    reactions = []
 
     if not trading_states:
-        return pnls, all_logs
+        return reactions
 
-    cash = {p: 0 for p in LISTINGS.keys()}
     state = trading_states[0]
+    local_traderData = {}
     for i in tqdm(range(0, len(trading_states)), desc="Running Backtest"):
         is_last_day = i+1 == len(trading_states)
 
-        # Start Simulation And Add Initial Bot Orders
+        # Start Simulation And Add Initial Bot Trades
         sim = Simulation(state)
-        all_trades: list[Trade] = []
-
-        # Generate And Push Own Orders
-        (all_orders, _, traderData), logs = capture_prints(lambda: trader.run(state))
-        all_logs[state.timestamp] = logs
-        for product, orders in all_orders.items():
-            for order in orders:
-                all_trades += sim.fill(order, "SUBMISSION")
-        
-        # Push Market Trades As Orders
-        next_market_trades = {} if is_last_day else deepcopy(trading_states[i+1].market_trades)
-        for product, market_trades in next_market_trades.items():
-            for market_trade in market_trades:
-                all_trades += sim.fill(Order(symbol=product, price=market_trade.price, quantity=market_trade.quantity), market_trade.buyer)
-                all_trades += sim.fill(Order(symbol=product, price=market_trade.price, quantity=-market_trade.quantity), market_trade.seller)
-
-        # Calculate Own Trades and Market Trades
+        logged_trades = {}
         own_trades = {product: [] for product in LISTINGS.keys()}
         market_trades = {product: [] for product in LISTINGS.keys()}
         positions = {product: state.position.get(product, 0) for product in LISTINGS.keys()}
-        for trade in all_trades:
-            product = trade.symbol
-            if trade.buyer == "SUBMISSION":
-                own_trades[product].append(trade)
-                positions[product] += trade.quantity
-                cash[product] -= trade.price * trade.quantity
-            elif trade.seller == "SUBMISSION":
-                own_trades[product].append(trade)
-                positions[product] -= trade.quantity
-                cash[product] += trade.price * trade.quantity
-            else:
-                market_trades[product].append(trade)
+
+        # Simulate My Trading
+        if use_local:
+            submitted_orders, _, local_traderData, logs = trader.local_run(state, local_traderData)
+        else:
+            (submitted_orders, _, traderData), logs = capture_prints(lambda: trader.run(state))
+        if use_reasons:
+            parsed_logs: dict[str, object] = logs if use_local else json.loads(logs, cls=MyP4Decoder) # type: ignore
+            logged_orders: dict[str, list[tuple[Order, str]]] = parsed_logs["orders"] # type: ignore
+            for product, orders in logged_orders.items():
+                for order, reason in orders:
+                    for match in sim.fill(order, "SUBMISSION", reason):
+                        trade = match.to_trade(product, state.timestamp)
+                        if reason not in logged_trades:
+                            logged_trades[reason] = []
+                        logged_trades[reason].append(trade)
+                        own_trades[product].append(trade)
+                        direction = 1 if trade.buyer == "SUBMISSION" else -1
+                        positions[product] += trade.quantity * direction
+        else:
+            for product, orders in submitted_orders.items():
+                for order in orders:
+                    reason = product
+                    for match in sim.fill(order, "SUBMISSION", reason):
+                        trade = match.to_trade(product, state.timestamp)
+                        if reason not in logged_trades:
+                            logged_trades[reason] = []
+                        logged_trades[reason].append(trade)
+                        own_trades[product].append(trade)
+                        direction = 1 if trade.buyer == "SUBMISSION" else -1
+                        positions[product] += trade.quantity * direction
         
-        # Calculate Per-Product Pnls
+        # Get Bot Orders Required for the Own Trades To Happen
+        # (see which own_trades were not present in the order_depths)
+        original_buy_orders: dict[str, dict[int, int]] = {}
+        original_sell_orders: dict[str, dict[int, int]] = {}
+        bot_orders: list[tuple[Order, str]] = [] # orders and buyers
+        next_own_trades = {} if is_last_day else trading_states[i+1].own_trades
+        for product, trades in next_own_trades.items():
+            for trade in trades:
+                if trade.buyer == "SUBMISSION": # I bought, bot sold
+                    if product not in original_sell_orders:
+                        original_sell_orders[product] = {k:v for k,v in state.order_depths[product].sell_orders.items()}
+                    if trade.price not in original_sell_orders[product]:
+                        bot_orders.append((Order(
+                            symbol=trade.symbol,
+                            price=trade.price,
+                            quantity=-trade.quantity
+                        ), trade.seller))
+                    elif original_sell_orders[product][trade.price] + trade.quantity < 0:
+                        original_sell_orders[product][trade.price] += trade.quantity
+                    elif original_sell_orders[product][trade.price] + trade.quantity == 0:
+                        del original_sell_orders[product][trade.price]
+                    else:
+                        bot_orders.append((Order(
+                            symbol=trade.symbol,
+                            price=trade.price,
+                            quantity=-(trade.quantity+original_sell_orders[product][trade.price])
+                        ), trade.seller))
+                        del original_sell_orders[product][trade.price]
+                elif trade.seller == "SUBMISSION": # I sold, bot bought
+                    if product not in original_buy_orders:
+                        original_buy_orders[product] = {k:v for k,v in state.order_depths[product].buy_orders.items()}
+                    if trade.price not in original_buy_orders[product]:
+                        bot_orders.append((Order(
+                            symbol=trade.symbol,
+                            price=trade.price,
+                            quantity=trade.quantity
+                        ), trade.buyer))
+                    elif original_buy_orders[product][trade.price] - trade.quantity > 0:
+                        original_buy_orders[product][trade.price] -= trade.quantity
+                    elif original_buy_orders[product][trade.price] - trade.quantity == 0:
+                        del original_buy_orders[product][trade.price]
+                    else:
+                        bot_orders.append((Order(
+                            symbol=trade.symbol,
+                            price=trade.price,
+                            quantity=trade.quantity-original_buy_orders[product][trade.price]
+                        ), trade.buyer))
+                        del original_buy_orders[product][trade.price]
+
+        # Get Bot Orders Required for Market Trades To Happen
+        next_market_trades = {} if is_last_day else trading_states[i+1].market_trades
+        for product, trades in next_market_trades.items():
+            for trade in trades:
+                # Break Each Trade Into Two Orders
+                bot_orders.append((Order(symbol=product, price=trade.price, quantity=trade.quantity), trade.buyer))
+                bot_orders.append((Order(symbol=product, price=trade.price, quantity=-trade.quantity), trade.seller))
+        
+        # Push Bot Trades
+        for order, by in bot_orders:
+            for match in sim.fill(order, by, ""):
+                product = order.symbol
+
+                trade = match.to_trade(product, state.timestamp)
+                if match.buy.by == "SUBMISSION":
+                    if match.buy.reason not in logged_trades:
+                        logged_trades[match.buy.reason] = []
+                    logged_trades[match.buy.reason].append(trade)
+                    own_trades[product].append(trade)
+                    positions[product] += trade.quantity
+                elif match.sell.by == "SUBMISSION":
+                    if match.sell.reason not in logged_trades:
+                        logged_trades[match.sell.reason] = []
+                    logged_trades[match.sell.reason].append(trade)
+                    own_trades[product].append(trade)
+                    positions[product] -= trade.quantity
+                else:
+                    market_trades[product].append(trade)
+
+        # Enforce Position Limits
         for product in LISTINGS.keys():
             position = positions.get(product, 0)
             if abs(position) > POSITION_LIMITS[product]:
                 sys.exit(f"Position Exceeded Limits at {state.timestamp} for {product}: {position}")
-            product_value = get_wall_mid(state.order_depths[product])
-            pnls[product][state.timestamp] = cash[product] + product_value * position
+        
+        # Push Results
+        reactions.append(Reaction(
+            input_state=state,
+            log=logs,
+            trades=logged_trades
+        ))
 
         # Generate Next State
         if not is_last_day:
             state = TradingState(
-                traderData=traderData,
+                traderData="" if use_local else traderData, # type: ignore
                 timestamp=trading_states[i+1].timestamp,
                 listings=LISTINGS,
                 order_depths=trading_states[i+1].order_depths,
@@ -533,28 +662,77 @@ def backtest(trader, trading_states: list[TradingState]) -> tuple[dict[str, dict
                 observations=Observation(plainValueObservations={}, conversionObservations={})
             )
     
-    # Parse Logs and Return
-    all_logs = parse_log_strings(all_logs)
-    return pnls, all_logs
+    return reactions
+
+class PnlAccount:
+    def __init__(self):
+        self.cash = 0
+        self.positions = {p: 0 for p in LISTINGS.keys()}
+
+    def trade(self, product, price, quantity):
+        self.positions[product] += quantity
+        self.cash -= price * quantity
+    
+    def get_pnl(self, product_values):
+        positions_value = sum([position * product_values[product] for product, position in self.positions.items()])
+        return self.cash + positions_value
 
 def get_pnls_from_trading_states(states: list[TradingState]):
+    """DEPRECATED"""
+
     pnls = {p: {} for p in LISTINGS.keys()}
-    cash = {p: 0 for p in LISTINGS.keys()}
-    positions = {p: 0 for p in LISTINGS.keys()}
+    sims = {p: PnlAccount() for p in LISTINGS.keys()}
     for state in states:
         # Update Positions
         for product, trades in state.own_trades.items():
             for trade in trades:
                 multiplier = 1 if trade.buyer == "SUBMISSION" else -1
-                positions[product] += trade.quantity * multiplier
-                cash[product] -= trade.price * trade.quantity * multiplier
+                sims[product].trade(product, trade.price, trade.quantity * multiplier)
         
         # Calculate Pnl
+        fair_prices = {get_wall_mid(state.order_depths[product]) for product in LISTINGS.keys()}
         for product in LISTINGS.keys():
-            position = positions.get(product, 0)
-            if abs(position) > POSITION_LIMITS[product]:
-                sys.exit(f"Position Exceeded Limits at {state.timestamp} for {product}: {position}")
-            product_value = get_wall_mid(state.order_depths[product])
-            pnls[product][state.timestamp] = cash[product] + product_value * position
+            pnls[product][state.timestamp] = sims[product].get_pnl(fair_prices)
     
     return pnls
+        
+def get_pnls_from_reactions(reactions: list[Reaction]) -> list[dict[str, int]]:
+    """
+    Returns a list of a dictionary that maps reason of trade to cumulative pnl.
+
+    Assumes the reactions are sorted by timestamp.
+    """
+
+    sims: dict[str, PnlAccount] = {}
+    pnls: list[dict[str, int]] = []
+    pnl = {}
+    for reaction in reactions:
+        fair_prices = {p: get_wall_mid(reaction.input_state.order_depths[p]) for p in LISTINGS.keys()}
+        for reason, trades in reaction.trades.items():
+            for trade in trades:
+                multiplier = 1 if trade.buyer == "SUBMISSION" else -1
+                if reason not in sims:
+                    sims[reason] = PnlAccount()
+                sims[reason].trade(trade.symbol, trade.price, trade.quantity * multiplier)
+        
+        pnl = {reason: sim.get_pnl(fair_prices) for reason, sim in sims.items()}
+        pnls.append(pnl)
+    
+    return pnls
+
+def calculate_moving_average(l, window, pad_front=None):
+    d = deque()
+    if pad_front is not None:
+        for _ in range(window):
+            d.appendleft(pad_front)
+    d_sum = pad_front * window
+    mas = []
+    for li in l:
+        d.appendleft(li)
+        d_sum += li
+        if len(d) > window:
+            lj = d.pop()
+            d_sum -= lj
+        mas.append(d_sum / len(d))
+    return mas
+
