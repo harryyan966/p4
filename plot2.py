@@ -43,6 +43,22 @@ class Plotter:
             [get_mid(s, self.product) - p for s, p in zip(self.states, self.baseline)]
         )
     
+    def plot_rolling_mid_moving_average(self, ax, window):
+        ax.plot(
+            [s.timestamp for s in self.states],
+            calculate_moving_average([get_mid(s, self.product) - p for s, p in zip(self.states, self.baseline)], window, pad_front=None)
+        )
+    
+    def plot_rolling_mid_exponential_moving_average(self, ax, window, multiplier):
+        ax.plot(
+            [s.timestamp for s in self.states],
+            calculate_exponential_moving_average(
+                [get_mid(s, self.product) - p for s, p in zip(self.states, self.baseline)],
+                window,
+                multiplier,
+                pad_front=None)
+        )
+    
     def plot_first_ask_wall(self, ax):
         ax.plot(
             [s.timestamp for s in self.states],
@@ -93,10 +109,16 @@ class Plotter:
         )
 
     def plot_pnls(self, ax, pnls):
-        ax.plot(
-            [t.timestamp for t in self.states],
-            [pnls[t.timestamp//100] for t in self.states]
-        )
+        seqs = {reason: [] for reason in pnls[-1].keys()}
+        for pnl in pnls:
+            for reason in seqs.keys():
+                seqs[reason].append(pnl.get(reason, 0))
+        for reason, seq in seqs.items():
+            ax.plot(
+                [t.timestamp for t in self.states],
+                seq,
+                label=reason
+            )
     
     def plot_price_delta_ma(self, ax, window=50):
         price_deltas = [
@@ -113,7 +135,7 @@ class Plotter:
 
 
 
-def visualize(states, pnls, product):
+def visualize(states, pnls: list[dict[str, int]], product):
     fig, ax = plt.subplots(5, 1, figsize=(20,40), dpi=100)
     # p = Plotter(states, product, [0 for _ in states])
     p = Plotter(states, product, [get_mid(s, product) for s in states])
@@ -124,7 +146,7 @@ def visualize(states, pnls, product):
     p.plot_first_ask_wall(ax[0])
     p.plot_first_bid_wall(ax[0])
     p.scatter_bot_trades(ax[0])
-    # p.scatter_own_trades(ax[0])
+    p.scatter_own_trades(ax[0])
     p.scatter_middle_orders(ax[0])
 
     ax[1].set_title("Position")
@@ -132,38 +154,37 @@ def visualize(states, pnls, product):
 
     ax[2].set_title("Pnl")
     p.plot_pnls(ax[2], pnls)
+    ax[2].legend()
 
     ax[3].set_title("Price Change Moving Average")
     p.plot_price_delta_ma(ax[3])
 
     ax[4].set_title("Price")
     p_raw.plot_mid(ax[4])
+    p_raw.plot_first_bid_wall(ax[4])
+    p_raw.plot_first_ask_wall(ax[4])
+    p_raw.plot_rolling_mid_moving_average(ax[4], 100)
 
     fig.savefig("image.png")
     
-def visualize_log(log_id, product):
-    states = get_trading_states_from_log(log_id)
-    pnls = get_pnls_from_trading_states(states)
-    visualize(states, pnls, product)
-
 def backtest_on_log_data_and_visualize(trader, log_id, product):
     bt_states = get_trading_states_from_log(log_id) # 33608
     assert len([trade for state in bt_states for trades in state.own_trades.values() for trade in trades]) == 0, "There are own trades" # TODO: incorporate own trades
     reactions = backtest(trader, bt_states) # TODO: cache backtest
     states = [reaction.input_state for reaction in reactions]
     all_pnls = get_pnls_from_reactions(reactions)
-    total_pnls = [sum(pnl.values()) for pnl in all_pnls]
-    visualize(states, total_pnls, product)
+    # total_pnls = [sum(pnl.values()) for pnl in all_pnls]
+    visualize(states, all_pnls, product)
 
 def backtest_on_full_data_and_visualize(trader, product, min_t=0, max_t=9000000):
     bt_states = get_trading_states_from_data(min_t, max_t)
     reactions = backtest(trader, bt_states) # TODO: cache backtest
     states = [reaction.input_state for reaction in reactions]
     all_pnls = get_pnls_from_reactions(reactions)
-    total_pnls = [sum(pnl.values()) for pnl in all_pnls]
-    visualize(states, total_pnls, product)
+    # total_pnls = [sum(pnl.values()) for pnl in all_pnls]
+    visualize(states, all_pnls, product)
 
 
 # Doesn't Quite Work Here
 from p4 import Trader
-backtest_on_full_data_and_visualize(Trader(), "TOMATOES", 0, 200000)
+backtest_on_full_data_and_visualize(Trader(), "TOMATOES", 0, 100000)

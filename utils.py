@@ -1,5 +1,5 @@
 import json
-from typing import NamedTuple
+from typing import NamedTuple, Callable
 from datamodel import TradingState, Order, OrderDepth, Trade, Listing, Observation, ConversionObservation
 import sys
 import os
@@ -10,6 +10,7 @@ import pandas as pd
 from tqdm import tqdm
 from copy import deepcopy
 from collections import deque
+import itertools
 
 LISTINGS = {
     "EMERALDS": Listing(
@@ -29,7 +30,9 @@ POSITION_LIMITS = {
     "TOMATOES": 80
 }
 
-def load_trading_states_from_data(min_timestamp = 0, max_timestamp = np.inf):
+GLOBAL_MAX_TIMESTAMP = 9_000_000
+
+def load_trading_states_from_data(min_timestamp = 0, max_timestamp = GLOBAL_MAX_TIMESTAMP):
     """
     Loads a list of TradingStates from provided data files.
     """
@@ -255,7 +258,7 @@ def parse_log_strings(raw_logs: dict[int, str]) -> dict[int, TraderLog]:
 
     return logs
 
-def get_wall_mid(order_depth):
+def get_wall_mid(order_depth: OrderDepth) -> float:
     """
     Returns the "fair price".
     
@@ -447,7 +450,7 @@ class Simulation:
     def fill(self, order: Order, by: str, reason: str):
         return self.books[order.symbol].quote(Quote(by, order.price, order.quantity, reason))
 
-def get_trading_states_from_data(min_t = 0, max_t = 9000000):
+def get_trading_states_from_data(min_t = 0, max_t = GLOBAL_MAX_TIMESTAMP):
     try:
         with open(f"cache/data_trading_states{min_t}-{max_t}.cache") as f:
             trading_states: list[TradingState] = [correct_state(s) for s in json.loads(f.read(), cls=MyP4Decoder)] # type: ignore
@@ -458,9 +461,17 @@ def get_trading_states_from_data(min_t = 0, max_t = 9000000):
             f.write(json.dumps(trading_states, cls=MyP4Encoder)) # type: ignore
         return trading_states
 
-def get_trading_states_from_log(log_id):
-    logs = parse_log_strings(get_log_strings(log_id))
-    return [get_relevant_state(log.state) for log in logs.values()]
+def get_trading_states_from_log(log_id, min_t = 0, max_t = GLOBAL_MAX_TIMESTAMP):
+    try:
+        with open(f"cache/log_{log_id}_trading_states{min_t}-{max_t}.cache") as f:
+            trading_states: list[TradingState] = [correct_state(s) for s in json.loads(f.read(), cls=MyP4Decoder)] # type: ignore
+        return trading_states
+    except FileNotFoundError:
+        states = sorted([l.state for l in parse_log_strings(get_log_strings(log_id)).values()], key=lambda s: s.timestamp)
+        trading_states: list[TradingState] = [get_relevant_state(s) for s in states]
+        with open(f"cache/log_{log_id}_trading_states{min_t}-{max_t}.cache", "w") as f:
+            f.write(json.dumps(trading_states, cls=MyP4Encoder)) # type: ignore
+        return trading_states
 
 def get_trading_states_from_cache(cache_file):
     with open(f"cache/{cache_file}.cache") as f:
@@ -503,9 +514,11 @@ class MyP4Decoder(json.JSONDecoder):
             return TradingState(d["traderData"], d["timestamp"], d["listings"], d["order_depths"], d["own_trades"], d["market_trades"], d["position"], d["observations"])
         return d
     
-def backtest(trader, trading_states: list[TradingState], use_local=True, use_reasons=True) -> list[Reaction]:
+def backtest(trader, trading_states: list[TradingState], use_local=True, use_reasons=True, parameters={}) -> list[Reaction]:
     """
     Backtests a trader, outputs a list of {state, log, takes, makes}
+
+    Setting parameters only work when use_local is set to True. (There is no reason to set use_local=False except debugging actual behavior, but you have to hardcode your parameters by then.)
 
     TODO: support conversions in backtester.
     """
@@ -529,7 +542,7 @@ def backtest(trader, trading_states: list[TradingState], use_local=True, use_rea
 
         # Simulate My Trading
         if use_local:
-            submitted_orders, _, local_traderData, logs = trader.local_run(state, local_traderData)
+            submitted_orders, _, local_traderData, logs = trader.local_run(state, local_traderData, parameters)
         else:
             (submitted_orders, _, traderData), logs = capture_prints(lambda: trader.run(state))
         if use_reasons:
@@ -725,7 +738,7 @@ def calculate_moving_average(l, window, pad_front=None):
     if pad_front is not None:
         for _ in range(window):
             d.appendleft(pad_front)
-    d_sum = pad_front * window
+    d_sum = pad_front * window if pad_front else 0
     mas = []
     for li in l:
         d.appendleft(li)
@@ -735,4 +748,38 @@ def calculate_moving_average(l, window, pad_front=None):
             d_sum -= lj
         mas.append(d_sum / len(d))
     return mas
+
+def calculate_exponential_moving_average(l, window, multiplier, pad_front=None):
+    multiplier_v = np.array([multiplier**k for k in range(window)])
+
+    d = deque()
+    if pad_front is not None:
+        for _ in range(window):
+            d.appendleft(pad_front)
+    mas = []
+    for li in l:
+        d.appendleft(li)
+        if len(d) > window:
+            d.pop()
+        ms = 0
+        m = 0
+        for i in range(len(d)):
+            ms += d[i] * multiplier_v[i]
+            m += multiplier_v[i]
+        mas.append(ms / m)
+
+    return mas
+
+
+def gridsearch_parameters(trader, states: list[TradingState], parameters: dict[str, list[object]], metric_fn: Callable[[list[Reaction]], object]):
+    results = []
+
+    combs = [dict(zip(parameters.keys(), comb)) for comb in itertools.product(*parameters.values())]
+
+    for comb in combs:
+        reactions = backtest(trader, states, use_local=True, use_reasons=True, parameters=comb)
+        metric = metric_fn(reactions)
+        results.append((metric, comb))
+
+    return results
 

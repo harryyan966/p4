@@ -53,11 +53,7 @@ Given a series of prices (perhaps relative to a mean level) and detect whether i
 
 Also we need to experiment with formulas to calculate the mean (moving average? exponential moving average? special formula?)
 
-### Grid searcher (For All Things Requiring Important Parameters)
-
-**Assigned to Max (You probably love parameter tuning)**
-
-Tune trader parameters and see their performance with the local backtester (long running but important to discover parameter dynamics, for more information look at frankfurt hedgehogs github page, they used it in the second round.)
+One more important insight in mean-reversion exploitation: the mean MUST be hedgeable. For example, you cannot mean revert something to its rolling mean, because you are essentially longing and shorting `price - rolling mean`. If you think price is too high above its rolling mean, you are believing that `price - rolling mean` is too high. In this case, to capitalize this mean reversion, you need to sell `price` AND BUY `rolling mean`. However, you cannot buy `rolling mean`. So however mean-reverting the price is to the rolling mean, you simply cannot exploit it. 
 
 ### Understand conversions API and upgrade backtester (For Conversion Rounds)
 
@@ -81,7 +77,9 @@ Perhaps correlate trades of different sizes and threshold with price movement wi
 
 Perhaps one step is to label bot trades to different buyers / sellers by quantity? (already semi-supported in the backtester)
 
+### Don't log state in live test, use their provided logs instead.
 
+just speeds the live test up a bit i guess
 
 
 
@@ -114,3 +112,25 @@ just strips the jsondecode and jsonencode layers and make a new local_run functi
 ### Add time order to QuoteHeap
 
 ensures orders submitted earlier get filled earlier
+
+### Implement Grid searcher (For All Things Requiring Important Parameters)
+
+Tune trader parameters and see their performance with the local backtester (long running but important to discover parameter dynamics.
+
+Example Usage: 
+
+```python
+from utils import * 
+from p4 import Trader
+
+states = get_trading_states_from_data()
+results = gridsearch_parameters(
+    Trader(),
+    states,
+    parameters={
+        "market_making_distance": list(range(1, 3))
+        "position_flattening_intensity": list(range(10, 80))
+    },
+    metric_fn: lambda reactions: sum(get_pnls_from_reactions(reactions)[-1].values()) # final total pnl
+)
+```

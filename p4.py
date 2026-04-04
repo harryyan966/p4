@@ -1,6 +1,7 @@
 from datamodel import TradingState, Symbol, Order, OrderDepth
 import heapq
 import json
+from typing import Callable
 
 class MyP4Encoder(json.JSONEncoder):
     def default(self, o):
@@ -112,7 +113,7 @@ FLAT_MM = "EMERALDS"
 MOVING_MM = "TOMATOES"
 
 
-def trade_flat_mm(state: TradingState, data: dict[str, object]):
+def trade_flat_mm(state: TradingState, data: dict[str, object], parameters: dict[str, object]):
     position = state.position.get(FLAT_MM, 0) # TODO: this position is static, if we do something we may doublecount
     market = Orderer(
         product=FLAT_MM,
@@ -155,7 +156,7 @@ def trade_flat_mm(state: TradingState, data: dict[str, object]):
 
     return market.get_orders(), data
 
-def trade_moving_mm(state: TradingState, data: dict[str, object]):
+def trade_moving_mm(state: TradingState, data: dict[str, object], parameters: dict[str, object]):
     position = state.position.get(MOVING_MM, 0)
     market = Orderer(
         product=MOVING_MM,
@@ -174,12 +175,12 @@ def trade_moving_mm(state: TradingState, data: dict[str, object]):
     mm_ask = asks[-1][0]
 
     # Take Orders And Update Market Making Prices
-    # We Don't Market Make Directly Because That Will Consume All Position Allowances
+    # We Don't Market Make Directly Because That Will Consume All Position Allowances (Adverse Selection?)
     for bp, bq in bids:
         if bp > mid: # take
             market.sell(bp, bq, "take tomatoes")
         elif bp == mid: # take to flat # TODO: make to flat
-            market.sell(bp, max(0, min(bq, position)), "flatten tomatoes") # max(min_sell, min(max_sell, want_to_sell))
+            market.sell(bp, max(0, min(bq+10, position)), "flatten tomatoes") # max(min_sell, min(max_sell, want_to_sell))
         elif bp+1 < mid: # make
             mm_bid = bp+1
             break
@@ -187,7 +188,7 @@ def trade_moving_mm(state: TradingState, data: dict[str, object]):
         if ap < mid: # take
             market.buy(ap, aq, "take tomatoes")
         elif ap == mid: # take to flat # TODO: make to flat
-            market.buy(ap, max(0, min(aq, -position)), "flatten tomatoes") # max(min_buy, min(max_buy, want_to_buy))
+            market.buy(ap, max(0, min(aq+10, -position)), "flatten tomatoes") # max(min_buy, min(max_buy, want_to_buy))
         elif ap-1 > mid: # make
             mm_ask = ap-1
             break
@@ -199,7 +200,7 @@ def trade_moving_mm(state: TradingState, data: dict[str, object]):
     return market.get_orders(), data
 
 class Trader:
-    def local_run(self, state: TradingState, old_trader_data: dict[str, dict[str, object]]) -> tuple[dict[Symbol, list[Order]], int, dict[str, dict[str, object]], dict[str, object]]:
+    def local_run(self, state: TradingState, old_trader_data: dict[str, dict[str, object]], parameters: dict[str, object]) -> tuple[dict[Symbol, list[Order]], int, dict[str, dict[str, object]], dict[str, object]]:
         """
         State in, orders out.
         """
@@ -207,12 +208,13 @@ class Trader:
         logged_orders: dict[str, list[tuple[Order, str]]] = {p: [] for p in state.listings.keys()}
         submitted_orders: dict[str, list[Order]] = {p: [] for p in state.listings.keys()}
         new_trader_data: dict[str, dict[str, object]] = {}
-        for label, runner in [
+        runners: list[tuple[str, Callable[[TradingState, dict[str, object], dict[str, object]], tuple[list[tuple[Order, str]], dict[str, object]]]]] = [
             # ("trade_flat_mm", trade_flat_mm),
             ("trade_moving_mm", trade_moving_mm),
-        ]:
+        ]
+        for label, runner in runners:
             trader_data = old_trader_data.get(label, {})
-            orders, trader_data = runner(state, trader_data)
+            orders, trader_data = runner(state, trader_data, parameters)
             for order, reason in orders:
                 logged_orders[order.symbol].append((order, reason))
                 submitted_orders[order.symbol].append(order)
@@ -228,7 +230,9 @@ class Trader:
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         """Wrapper of local_run but handles serialization"""
 
+        PARAMETERS = {}
+
         old_trader_data: dict[str, dict[str, object]] = json.loads(state.traderData) if state.traderData else {} # type: ignore
-        submitted_orders, conversion, new_trader_data, logs = self.local_run(state, old_trader_data)
+        submitted_orders, conversion, new_trader_data, logs = self.local_run(state, old_trader_data, PARAMETERS)
         print(json.dumps(logs, cls=MyP4Encoder))
         return submitted_orders, conversion, json.dumps(new_trader_data, cls=MyP4Encoder)
