@@ -134,3 +134,5 @@ results = gridsearch_parameters(
     metric_fn: lambda reactions: sum(get_pnls_from_reactions(reactions)[-1].values()) # final total pnl
 )
 ```
+
+### Bug fix: TradingData generation: every timestamp, all trades you see should be of timestamp - 100

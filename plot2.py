@@ -110,15 +110,29 @@ class Plotter:
 
     def plot_pnls(self, ax, pnls):
         seqs = {reason: [] for reason in pnls[-1].keys()}
+        total_pnls = []
         for pnl in pnls:
+            total_pnl = 0
             for reason in seqs.keys():
-                seqs[reason].append(pnl.get(reason, 0))
+                reason_pnl = pnl.get(reason, 0)
+                seqs[reason].append(reason_pnl)
+                total_pnl += reason_pnl
+            total_pnls.append(total_pnl)
+        seqs["total"] = total_pnls
         for reason, seq in seqs.items():
             ax.plot(
                 [t.timestamp for t in self.states],
                 seq,
                 label=reason
             )
+    
+    def plot_total_pnl(self, ax, pnls):
+        total_pnls = [sum(pnl.values()) for pnl in pnls]
+        ax.plot(
+            [t.timestamp for t in self.states],
+            total_pnls,
+            label="total"
+        )
     
     def plot_price_delta_ma(self, ax, window=50):
         price_deltas = [
@@ -136,7 +150,7 @@ class Plotter:
 
 
 def visualize(states, pnls: list[dict[str, int]], product):
-    fig, ax = plt.subplots(5, 1, figsize=(20,40), dpi=100)
+    fig, ax = plt.subplots(4, 1, figsize=(20,40), dpi=100)
     # p = Plotter(states, product, [0 for _ in states])
     p = Plotter(states, product, [get_mid(s, product) for s in states])
     p_raw = Plotter(states, product, [0 for _ in states])
@@ -152,25 +166,22 @@ def visualize(states, pnls: list[dict[str, int]], product):
     ax[1].set_title("Position")
     p.plot_position(ax[1])
 
-    ax[2].set_title("Pnl")
-    p.plot_pnls(ax[2], pnls)
-    ax[2].legend()
+    if pnls:
+        ax[2].set_title("Pnl")
+        p.plot_total_pnl(ax[2], pnls)
+        ax[2].legend()
 
-    ax[3].set_title("Price Change Moving Average")
-    p.plot_price_delta_ma(ax[3])
-
-    ax[4].set_title("Price")
-    p_raw.plot_mid(ax[4])
-    p_raw.plot_first_bid_wall(ax[4])
-    p_raw.plot_first_ask_wall(ax[4])
-    p_raw.plot_rolling_mid_moving_average(ax[4], 100)
+    p_raw.plot_mid(ax[3])
+    p_raw.plot_first_bid_wall(ax[3])
+    p_raw.plot_first_ask_wall(ax[3])
+    p_raw.plot_rolling_mid_moving_average(ax[3], 100)
 
     fig.savefig("image.png")
     
 def backtest_on_log_data_and_visualize(trader, log_id, product):
     bt_states = get_trading_states_from_log(log_id) # 33608
     assert len([trade for state in bt_states for trades in state.own_trades.values() for trade in trades]) == 0, "There are own trades" # TODO: incorporate own trades
-    reactions = backtest(trader, bt_states) # TODO: cache backtest
+    reactions = backtest(trader, bt_states)
     states = [reaction.input_state for reaction in reactions]
     all_pnls = get_pnls_from_reactions(reactions)
     # total_pnls = [sum(pnl.values()) for pnl in all_pnls]
@@ -178,13 +189,23 @@ def backtest_on_log_data_and_visualize(trader, log_id, product):
 
 def backtest_on_full_data_and_visualize(trader, product, min_t=0, max_t=9000000):
     bt_states = get_trading_states_from_data(min_t, max_t)
-    reactions = backtest(trader, bt_states) # TODO: cache backtest
+    reactions = backtest(trader, bt_states)
     states = [reaction.input_state for reaction in reactions]
     all_pnls = get_pnls_from_reactions(reactions)
     # total_pnls = [sum(pnl.values()) for pnl in all_pnls]
     visualize(states, all_pnls, product)
 
 
-# Doesn't Quite Work Here
+# # Doesn't Quite Work Here
 from p4 import Trader
-backtest_on_full_data_and_visualize(Trader(), "TOMATOES", 0, 100000)
+# backtest_on_full_data_and_visualize(Trader(), "TOMATOES", 0, 100000)
+bt_states = get_trading_states_from_data(0, 100000)
+reactions = backtest(Trader(), bt_states)
+states = [reaction.input_state for reaction in reactions]
+baseline = [get_mid(s, "TOMATOES") for s in states]
+middle_orders = [(order, p) for s,p in zip(states, baseline) for order in get_middle_orders(s, "TOMATOES")]
+trades = [(t,p) for s,p in zip(states, baseline) for t in s.own_trades.get("TOMATOES", [])]
+print(middle_orders[2])
+print(trades[3])
+print([t[0].price - t[1] for t in trades][3])
+print(trades[3][0].price)

@@ -32,7 +32,7 @@ POSITION_LIMITS = {
 
 GLOBAL_MAX_TIMESTAMP = 9_000_000
 
-def load_trading_states_from_data(min_timestamp = 0, max_timestamp = GLOBAL_MAX_TIMESTAMP):
+def load_trading_states_from_data(min_timestamp = 0, max_timestamp = GLOBAL_MAX_TIMESTAMP) -> list[TradingState]:
     """
     Loads a list of TradingStates from provided data files.
     """
@@ -75,7 +75,7 @@ def load_trading_states_from_data(min_timestamp = 0, max_timestamp = GLOBAL_MAX_
             buyer="" if np.isnan(buyer) else buyer, # type: ignore
             seller="" if np.isnan(seller) else seller # type: ignore
         ))
-
+    
     def get_buy_orders(row: pd.Series):
         buy_orders = {}
         for number in [1, 2, 3]:
@@ -99,7 +99,7 @@ def load_trading_states_from_data(min_timestamp = 0, max_timestamp = GLOBAL_MAX_
     # Deserialize prices
     for timestamp, rows in tqdm(prices_df.groupby("timestamp"), total=prices_df["timestamp"].nunique(), desc="Generating Trading States"): # type: ignore
         books = {product: rows[rows.get("product", "") == product].iloc[0] for product in LISTINGS.keys()}
-        trades_now = all_trades.get(timestamp, {})
+        trades_now = all_trades.get(timestamp-100, {})
 
         order_depths = {}
         for product, book in books.items():
