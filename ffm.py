@@ -17,11 +17,13 @@ Carries some interesting ideas, but in summary:
 """
 
 
+# TODO for each quantity, plot the future price movement and show it in one plot, examine. 
+# TODO grid search on position level to be on (all in? half? etc.) when we detect signals. 
+# TODO update visulaization so that trades happen between orderbooks (LOW PRIORITY)
+
 
 
 from datamodel import *
-import numpy as np
-import math
 from statistics import NormalDist
 
 NORMAL_DISTRIBUTION = NormalDist()
@@ -45,51 +47,22 @@ O10500 = "VOLCANIC_ROCK_VOUCHER_10500"
 
 F = "MAGNIFICENT_MACARONS"
 
-# POS_LIMITS = {
-#     STATIC_SYMBOL: 50, 
-#     DYNAMIC_SYMBOL: 50,
-#     INK_SYMBOL: 50,
-#     ETF_BASKET_SYMBOLS[0]: 60,
-#     ETF_BASKET_SYMBOLS[1]: 100,
-#     ETF_CONSTITUENT_SYMBOLS[0]: 250,
-#     ETF_CONSTITUENT_SYMBOLS[1]: 350,
-#     ETF_CONSTITUENT_SYMBOLS[2]: 60,
+# INITIAL_BASKET_PREMIUM = [5, 53] # Initial E[basket price - constituent price sum] NOTE They probably got this from just taking the mean premium of all the previous samples
+# BASKET_THRESHOLDS = [80, 50] # Bet on mean reversion when abs(deviation) > mean deviation TODO (how did they get this)
+# n_hist_samples = 60000 # Number of samples they used to derive the intial basket premium
+# ETF_THR_INFORMED_ADJS = [90, 90] # TODO (how is it used?) (how did they get this?)
 
-#     OPTION_UNDERLYING_SYMBOL: 400,
-#     **{os: 200 for os in OPTION_SYMBOLS},
-
-#     COMMODITY_SYMBOL: 75,
-# }
-
-# CONVERSION_LIMIT = 10
-
-# INSIDER = "Olivia"
-
-# 6, 3, 1; 4, 2, 0
-# INITIAL_BASKET_PREMIUM = [5, 53] # TODO(how do you get this?)
-# BASKET_THRRESHOLDS = [80, 50]
-# n_hist_samples = 60000 TODO(??)
-# ETF_THR_INFORMED_ADJS = [90, 90] TODO(??)
-
-# TODO: make a thing that auto-detects informed traders
+# TODO: remove the mean premium method and come up with a better way to calculate basket premium. 
 # TODO: make a orderbook that gets pnl pct for all traders
 
-# THR_OPEN, THR_CLOSE
-# LOW_VEGA_THR_ADJ
-# THEO_NORM_WINDOW
-# iv_scalping_thr # TODO: get thr and window and mean from mean reverting process
-# iv_scalping_window
-# mean_reversion_thr # how do you get these
-# mean_reversion_window
-# mean_reversion_thr
-# mean_reversion_window
-
-
-
-# product_group means "ETF", etc.
-
-# self.total_mkt_buy_volume, .. = get_tota_market_buy_sell_volume() (??)
-
+# THR_OPEN # Bet on mean reversion when abs(deviation) > THR_OPEN
+# THR_CLOSE # Flatten position when abs(deviation) < THR_CLOSE
+# LOW_VEGA_THR_ADJ # TODO how is this used?
+# THEO_NORM_WINDOW # TODO how is this used?
+# iv_scalping_thr # TODO how is this used?
+# iv_scalping_window # TODO how is this used?
+# mean_reversion_thr # TODO how is this used?
+# mean_reversion_window # TODO how is this used?
 
 # Is there a way to better exploit mean reversion other than threshold?
 # Can we adjust position or adjust market making (tilt) to do that?
@@ -98,50 +71,48 @@ F = "MAGNIFICENT_MACARONS"
 
 def trade_mm():
     def profitable(order):
-        return order.q < 0 and order.p < mid order.q > 0 and order.p > mid
+        mid = get_mid(order)
+        return order.q < 0 and order.p < mid \
+            or order.q > 0 and order.p > mid # bid or ask cross mid
 
     for order in orders:
         if profitable(order):
             take(order)
-    mm_buy(d=1, include_mid=False)
-    mm_sell(d=1, include_mid=False)
-    # TODO: overbid the best bid under the mid wall, if best bid is above mid wall, cover the second best. (but i don't think it will contribute THAT much)
+    market_make(d=1, include_mid=False)
 
 def trade_mm_mr():
     
-    if informed_long and have_been_long(5): # TODO: how to determine have_been_long parameter
-        buy_until_pos_is(40) # TODO: this parameter too
+    if informed_long and have_been_long(5):
+        buy_until_pos_is(40)
     if wall_pushed_too_in and informed_short:
-        bid_at_wall_not_over_it() # TODO but why this
+        put_market_make_bids_at_wall_not_over_it()
     if informed_short and have_been_short(5):
         sell_until_pos_is(-40)
     if wall_pushed_too_in and informed_long:
-        ask_at_wall_not_over_it()
-    # TODO: determine how long does the informed trader's thing take effect and how long does it last
-
+        put_market_make_asks_at_wall_not_over_it()
 
 def trade_ink():
     if informed_long:
         buy_until_pos_is(POS_POS_LIMIT)
     if informed_short:
         sell_until_pos_is(NEG_POS_LIMIT)
-    mm_buy(d=0, include_mid=False)
-    mm_sell(d=0, include_mid=False)
+    market_make(d=0, include_mid=False)
 
-def trade_etf():
-    delta_from_mean = {}
+def trade_etf(data):
+    deviation = {}
     for basket in [B1, B2]:
         basket_price = basket.price
         constituents_price_sum = basket.constituents.map(c => c.price).sum()
         if CALCULATE_RUNNING_ETF_PREMIUM: # they set to true, which i think is MAYBE?? correct??
-            if basket_premiums_history:
-                basket_premium = mean(basket_premiums, max_n=60000) # TODO: where did you get the max_n
-                basket_premiums_history.append(basket_premium)
+            if data.mean_premium:
+                basket_premium = (basket_price - constituents_price_sum) - data.mean_premium
+                data.mean_premium += basket_premium / (data.mean_premium.count + 1)
             else:
-                basket_premium = basket.initial_premium # TODO: how do you calculate that?
+                data.mean_premium = basket.initial_premium
+                data.mean_premium.count = n_hist_samples # 60000
         else:
             basket_premium = basket.initial_premium # constant premium
-        delta_from_mean[basket] = basket_price - constituents_price_sum - basket_premium
+        deviation[basket] = (basket_price - constituents_price_sum) - basket_premium
     
     # buy / sell the basket based on constituent prices instead of the other way around TODO: why?
     for basket in [B1, B2]:
@@ -149,14 +120,14 @@ def trade_etf():
 
         # TODO: find a better way to incorporate informed traders than to adjust the threshold.
 
-        if delta_from_mean[basket] > basket.sell_threshold + baseline:
+        if deviation[basket] > basket.sell_threshold + baseline:
             sell_all()
-        if delta_from_mean[basket] < basket.buy_threshold + baseline:
+        if deviation[basket] < basket.buy_threshold + baseline:
             buy_all()
         if ETF_CLOSE_AT_ZERO: # they set this to true, which i think is correct.
-            if delta_from_mean[basket] > baseline and we_are_buying():
+            if deviation[basket] > baseline and we_are_buying():
                 flat_postiion() # we were buying because price was too low, now price went back. 
-            if delta_from_mean[basket] < baseline and we_are_selling():
+            if deviation[basket] < baseline and we_are_selling():
                 flat_postiion() # we were selling because price was too high, now price went back. 
     
     # Trade informed constituent C1

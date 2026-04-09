@@ -20,7 +20,6 @@ def assert_equal(s1: TradingState, s2: TradingState):
 
 def main2():
     bt_states = get_trading_states_from_log("46883")
-    # bt_states = get_trading_states_from_data()
     reactions = backtest(Trader(), bt_states, use_local=False, use_reasons=True)
     states = [reaction.input_state for reaction in reactions]
 
@@ -47,7 +46,6 @@ def main2():
 
 def main():
     bt_states = get_trading_states_from_log("46883")
-    # bt_states = get_trading_states_from_data()
     reactions = backtest(Trader(), bt_states, use_local=False, use_reasons=True)
     states = [reaction.input_state for reaction in reactions]
 

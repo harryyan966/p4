@@ -188,7 +188,7 @@ def backtest_on_log_data_and_visualize(trader, log_id, product):
     visualize(states, all_pnls, product)
 
 def backtest_on_full_data_and_visualize(trader, product, min_t=0, max_t=9000000):
-    bt_states = get_trading_states_from_data(min_t, max_t)
+    bt_states = get_trading_states_from_data("data", [0, 1] min_t, max_t)
     reactions = backtest(trader, bt_states)
     states = [reaction.input_state for reaction in reactions]
     all_pnls = get_pnls_from_reactions(reactions)
@@ -199,7 +199,7 @@ def backtest_on_full_data_and_visualize(trader, product, min_t=0, max_t=9000000)
 # # Doesn't Quite Work Here
 from p4 import Trader
 # backtest_on_full_data_and_visualize(Trader(), "TOMATOES", 0, 100000)
-bt_states = get_trading_states_from_data(0, 100000)
+bt_states = get_trading_states_from_data("data", [0, 1], 0, 100000)
 reactions = backtest(Trader(), bt_states)
 states = [reaction.input_state for reaction in reactions]
 baseline = [get_mid(s, "TOMATOES") for s in states]

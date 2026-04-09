@@ -77,15 +77,25 @@ Perhaps correlate trades of different sizes and threshold with price movement wi
 
 Perhaps one step is to label bot trades to different buyers / sellers by quantity? (already semi-supported in the backtester)
 
-### Don't log state in live test, use their provided logs instead.
 
-just speeds the live test up a bit i guess
+---
+
+## Changlogs apr10
+
+### Incorporate Prosperity 3 Data for Backtesting
+
+Go over the ff strategy again and test it on p3 data. 
+1. Can't really discover the anomalous tradings with my methods here... we have to sort of realistically see the raw scenario without any arbitrary transformation that would lose not only noise but also signal. For example the rolling min-max tracking framework will not be possible to devise based on a rigid thinking framework. 
+
+### Make examples of common actions
+
+backtest, grid search, visualize
 
 
 
+---
 
-
-## Changlogs since apr4 (Thought useful to add so you know what I'm doing)
+## Changlogs apr4 (Thought useful to add so you know what I'm doing)
 
 ### distinguish trade reasons in backtester
 
@@ -123,7 +133,7 @@ Example Usage:
 from utils import * 
 from p4 import Trader
 
-states = get_trading_states_from_data()
+states = get_trading_states_from_data("data", [0, 1])
 results = gridsearch_parameters(
     Trader(),
     states,

@@ -34,13 +34,25 @@ def detect_mean_reversion(values: np.ndarray) -> dict:
         "half_life": half_life,  # in number of ticks, how fast it reverts
     }
 
-def generate_similar_random_walk(prices: np.ndarray) -> list[float]:
+def generate_random_walk(start, length, mu=0, sigma=1):
+    walk = [start]
+    for _ in range(length - 1):
+        walk.append(walk[-1] + np.random.normal(mu, sigma))
+    
+    return np.array(walk)
+
+def generate_similar_random_walk(prices: np.ndarray):
     diffs = np.diff(prices)
     mu = np.mean(diffs)
     sigma = np.std(diffs)
-    
-    walk = [prices[0]]
-    for _ in range(len(prices) - 1):
-        walk.append(walk[-1] + np.random.normal(mu, sigma))
-    
-    return walk
+
+    print(f"Mu: {mu}, Sigma: {sigma}")
+
+    return generate_random_walk(prices[0], len(prices), mu, sigma) # type: ignore
+
+def generate_ou_process(n, theta=0.1, mu=0, sigma=1, dt=1, x0=0):
+    x = [x0]
+    for _ in range(n - 1):
+        dx = theta * (mu - x[-1]) * dt + sigma * np.random.normal(0, np.sqrt(dt))
+        x.append(x[-1] + dx)
+    return np.array(x)

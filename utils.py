@@ -11,8 +11,10 @@ from tqdm import tqdm
 from copy import deepcopy
 from collections import deque
 import itertools
+import os
+import heapq
 
-LISTINGS = {
+P4_LISTINGS = {
     "EMERALDS": Listing(
         symbol="EMERALDS",
         product="EMERALDS",
@@ -25,14 +27,34 @@ LISTINGS = {
     ),
 }
 
-POSITION_LIMITS = {
+P4_POSITION_LIMITS = {
     "EMERALDS": 80,
     "TOMATOES": 80
 }
 
+P3_POSITION_LIMITS = {
+    "RAINFOREST_RESIN": 50,
+    "KELP": 50,
+    "SQUID_INK": 50,
+    "CROISSANTS": 250,
+    "JAMS": 350,
+    "DJEMBES": 60,
+    "PICNIC_BASKET1": 60,
+    "PICNIC_BASKET2": 100,
+    "VOLCANIC_ROCK": 400,
+    "VOLCANIC_ROCK_VOUCHER_9500": 200,
+    "VOLCANIC_ROCK_VOUCHER_9750": 200,
+    "VOLCANIC_ROCK_VOUCHER_10000": 200,
+    "VOLCANIC_ROCK_VOUCHER_10250": 200,
+    "VOLCANIC_ROCK_VOUCHER_10500": 200,
+    "MAGNIFICENT_MACARONS": 75,
+}
+
+P3_LISTINGS = {k: Listing(k, k, "1") for k in P3_POSITION_LIMITS.keys()}
+
 GLOBAL_MAX_TIMESTAMP = 9_000_000
 
-def load_trading_states_from_data(min_timestamp = 0, max_timestamp = GLOBAL_MAX_TIMESTAMP) -> list[TradingState]:
+def load_trading_states_from_data(data_loc, days, base_listings, min_timestamp = 0, max_timestamp = GLOBAL_MAX_TIMESTAMP) -> list[TradingState]:
     """
     Loads a list of TradingStates from provided data files.
     """
@@ -40,17 +62,18 @@ def load_trading_states_from_data(min_timestamp = 0, max_timestamp = GLOBAL_MAX_
     # Grab dataframes
     price_dfs: list[pd.DataFrame] = []
     trade_dfs: list[pd.DataFrame] = []
-    for day in [0, 1]:
-        price = pd.read_csv(f"data/price{day}.csv", sep=";")
+    for day in days:
+        prices_path = os.path.normpath(f"{data_loc}/prices{day}.csv")
+        trades_path = os.path.normpath(f"{data_loc}/trades{day}.csv")
+        price = pd.read_csv(prices_path, sep=";")
+        trade = pd.read_csv(trades_path, sep=";")
         price["timestamp"] = day * 1000000 + price["timestamp"]
-        price_dfs.append(price)
-    for day in [0, 1]:
-        trade = pd.read_csv(f"data/trade{day}.csv", sep=";")
         trade["timestamp"] = day * 1000000 + trade["timestamp"]
+        price_dfs.append(price)
         trade_dfs.append(trade)
     prices_df = pd.concat(price_dfs)
-    prices_df = prices_df[(prices_df["timestamp"] <= max_timestamp) & (prices_df["timestamp"] >= min_timestamp)]
     trades_df = pd.concat(trade_dfs)
+    prices_df = prices_df[(prices_df["timestamp"] <= max_timestamp) & (prices_df["timestamp"] >= min_timestamp)]
     trades_df = trades_df[(trades_df["timestamp"] <= max_timestamp) & (trades_df["timestamp"] >= min_timestamp)]
 
     trading_states: list[TradingState] = []
@@ -64,16 +87,16 @@ def load_trading_states_from_data(min_timestamp = 0, max_timestamp = GLOBAL_MAX_
             all_trades[timestamp] = {}
         if product not in all_trades[timestamp]:
             all_trades[timestamp][product] = []
-        buyer = trade.get("buyer", "")
-        seller = trade.get("seller", "")
+        buyer = "" if np.isnan(trade.get("buyer", "")) else trade.get("buyer", "")
+        seller = "" if np.isnan(trade.get("seller", "")) else trade.get("seller", "")
 
         all_trades[timestamp][product].append(Trade(
             timestamp=trade.get('timestamp'), # type: ignore
             symbol=product, # type: ignore
             price=int(trade.get('price')), # type: ignore
             quantity=int(trade.get('quantity')), # type: ignore
-            buyer="" if np.isnan(buyer) else buyer, # type: ignore
-            seller="" if np.isnan(seller) else seller # type: ignore
+            buyer=buyer, # type: ignore
+            seller=seller # type: ignore
         ))
     
     def get_buy_orders(row: pd.Series):
@@ -97,8 +120,10 @@ def load_trading_states_from_data(min_timestamp = 0, max_timestamp = GLOBAL_MAX_
         return sell_orders
 
     # Deserialize prices
+    products = prices_df["product"].unique()
+    listings = {k: v for k, v in base_listings.items() if k in products}
     for timestamp, rows in tqdm(prices_df.groupby("timestamp"), total=prices_df["timestamp"].nunique(), desc="Generating Trading States"): # type: ignore
-        books = {product: rows[rows.get("product", "") == product].iloc[0] for product in LISTINGS.keys()}
+        books = {row.get("product", ""): row for _, row in rows.iterrows()}
         trades_now = all_trades.get(timestamp-100, {})
 
         order_depths = {}
@@ -118,11 +143,11 @@ def load_trading_states_from_data(min_timestamp = 0, max_timestamp = GLOBAL_MAX_
                 market_trades[product].append(trade)
         
         position = {}
-        
+
         trading_states.append(TradingState(
             traderData="",
             timestamp=timestamp,
-            listings=LISTINGS,
+            listings=listings,
             order_depths=order_depths,
             own_trades=own_trades,
             market_trades=market_trades,
@@ -258,6 +283,18 @@ def parse_log_strings(raw_logs: dict[int, str]) -> dict[int, TraderLog]:
 
     return logs
 
+def get_best_bid(order_depth: OrderDepth) -> float:
+    return max(order_depth.buy_orders.keys())
+
+def get_best_ask(order_depth: OrderDepth) -> float:
+    return min(order_depth.sell_orders.keys())
+
+def get_bid_wall(order_depth: OrderDepth) -> float:
+    return min(order_depth.buy_orders.keys())
+
+def get_ask_wall(order_depth: OrderDepth) -> float:
+    return max(order_depth.sell_orders.keys())
+
 def get_wall_mid(order_depth: OrderDepth) -> float:
     """
     Returns the "fair price".
@@ -265,51 +302,7 @@ def get_wall_mid(order_depth: OrderDepth) -> float:
     Interesting phenomenon in these prosperity contests: there will be "walls" (large bids and asks) that define the reasonable trade range. You virtually cannot break through the walls. The average of the wall prices is the "reasonable price"
     """
 
-    return (min(order_depth.buy_orders.keys()) + max(order_depth.sell_orders.keys())) / 2
-
-def print_trader_log(log: TraderLog, mid_price_formula=get_wall_mid, products=list(LISTINGS.keys())):
-    """
-    Pretty-prints a TraderLog.
-    """
-
-    state = log.state
-    print(f" === Trader Log T = {state.timestamp} === ")
-    for product in products:
-        print(f"{product}:")
-        book = state.order_depths.get(product, OrderDepth())
-        own_trades = state.own_trades.get(product, [])
-        market_trades = state.market_trades.get(product, [])
-        position = state.position.get(product, 0)
-        orders = log.orders.get(product, [])
-        buy_orders = [(p, 0, q) for p, q in book.buy_orders.items()]
-        sell_orders = [(p, 0, q) for p, q in book.sell_orders.items()]
-        my_orders = [(order.price, -1 if order.quantity > 0 else 1, order.quantity) for order in orders]
-        my_trades = [(trade.price, 2, trade.quantity) for trade in own_trades if trade.timestamp == state.timestamp-100]
-        bot_trades = [(trade.price, 3, trade.quantity) for trade in market_trades if trade.timestamp == state.timestamp-100]
-        mid_price = mid_price_formula(book)
-        for order in sorted(buy_orders + sell_orders + my_orders + my_trades + bot_trades + [(mid_price, 4, 0)], reverse=True):
-            if order[1] == 0:
-                print(f"\t({order[0]}, {order[2]})")
-            elif abs(order[1]) == 1:
-                print(f"\t<<{order[0]}, {order[2]}>>")
-            elif order[1] == 2:
-                print(f"\tOWN <<{order[0]}, {order[2]}>>")
-            elif order[1] == 3:
-                print(f"\tBOT ({order[0]}, {order[2]})")
-            else:
-                print(f"MID: {order[0]} -------------")
-        if position > 0:
-            print(f"\tLONG: {position}")
-        elif position < 0:
-            print(f"\tSHORT: {position}")
-        else:
-            print(f"\tFLAT POSITION")
-        if not my_trades:
-            print(f"\tNO OWN TRADES")
-        if not bot_trades:
-            print(f"\tNO BOT TRADES")
-        if not orders:
-            print(f"\tNO ORDERS POSTED")
+    return (get_bid_wall(order_depth) + get_ask_wall(order_depth)) / 2
 
 def capture_prints(function):
     """Pass the function inside this function to run it while having the prints captured."""
@@ -319,15 +312,6 @@ def capture_prints(function):
         result = function()
     prints = f.getvalue()
     return result, prints
-
-def clear_console():
-    """
-    If you run python something.py in the console, this function removes everything in the console.
-    """
-
-    os.system('cls' if os.name == 'nt' else 'clear')
-
-import heapq
 
 # TODO: implement time order
 class Quote(NamedTuple):
@@ -434,7 +418,7 @@ class OrderBook:
 class Simulation:
     def __init__(self, state: TradingState):
         self.books: dict[str, OrderBook] = {}
-        for product in LISTINGS.keys():
+        for product in state.listings.keys():
             book = OrderBook()
             order_depth = state.order_depths.get(product, OrderDepth())
             bids = order_depth.buy_orders
@@ -450,37 +434,40 @@ class Simulation:
     def fill(self, order: Order, by: str, reason: str):
         return self.books[order.symbol].quote(Quote(by, order.price, order.quantity, reason))
 
-def get_trading_states_from_data(min_t = 0, max_t = GLOBAL_MAX_TIMESTAMP):
-    try:
-        with open(f"cache/data_trading_states{min_t}-{max_t}.cache") as f:
-            trading_states: list[TradingState] = [correct_state(s) for s in json.loads(f.read(), cls=MyP4Decoder)] # type: ignore
-        return trading_states
-    except FileNotFoundError:
-        trading_states: list[TradingState] = [get_relevant_state(s) for s in load_trading_states_from_data(min_t, max_t)]
-        with open(f"cache/data_trading_states{min_t}-{max_t}.cache", "w") as f:
-            f.write(json.dumps(trading_states, cls=MyP4Encoder)) # type: ignore
-        return trading_states
+def get_trading_states_from_data(data_loc, days, use_p3=False, min_t=0, max_t=GLOBAL_MAX_TIMESTAMP, use_cache=True):
+    base_listings = P3_LISTINGS if use_p3 else P4_LISTINGS
+    if use_cache:
+        try:
+            cache_path = os.path.normpath(f"cache/{data_loc}/states_{min_t}-{max_t}.cache")
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path) as f:
+                trading_states: list[TradingState] = [correct_state(s) for s in json.loads(f.read(), cls=MyP4Decoder)] # type: ignore
+            return trading_states
+        except FileNotFoundError:
+            pass
+    trading_states: list[TradingState] = [get_relevant_state(s) for s in load_trading_states_from_data(data_loc, days, base_listings, min_t, max_t)]
+    cache_path = os.path.normpath(f"cache/{data_loc}/states_{min_t}-{max_t}.cache")
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    with open(cache_path, "w") as f:
+        f.write(json.dumps(trading_states, cls=MyP4Encoder)) # type: ignore
+    return trading_states
 
 def get_trading_states_from_log(log_id, min_t = 0, max_t = GLOBAL_MAX_TIMESTAMP):
     try:
-        with open(f"cache/log_{log_id}_trading_states{min_t}-{max_t}.cache") as f:
+        with open(f"cache/log_{log_id}_states{min_t}-{max_t}.cache") as f:
             trading_states: list[TradingState] = [correct_state(s) for s in json.loads(f.read(), cls=MyP4Decoder)] # type: ignore
         return trading_states
     except FileNotFoundError:
         states = sorted([l.state for l in parse_log_strings(get_log_strings(log_id)).values()], key=lambda s: s.timestamp)
         trading_states: list[TradingState] = [get_relevant_state(s) for s in states]
-        with open(f"cache/log_{log_id}_trading_states{min_t}-{max_t}.cache", "w") as f:
+        with open(f"cache/log_{log_id}_states{min_t}-{max_t}.cache", "w") as f:
             f.write(json.dumps(trading_states, cls=MyP4Encoder)) # type: ignore
         return trading_states
-
-def get_trading_states_from_cache(cache_file):
-    with open(f"cache/{cache_file}.cache") as f:
-        trading_states: list[TradingState] = [correct_state(s) for s in json.loads(f.read(), cls=MyP4Decoder)] # type: ignore
-    return trading_states
 
 class Reaction(NamedTuple):
     input_state: TradingState # state seen by trader
     log: str # log string output by trader
+    orders: dict[str, list[Order]] # map from reason to order
     trades: dict[str, list[Trade]] # map from reason to trade
 
 class MyP4Encoder(json.JSONEncoder):
@@ -514,7 +501,7 @@ class MyP4Decoder(json.JSONDecoder):
             return TradingState(d["traderData"], d["timestamp"], d["listings"], d["order_depths"], d["own_trades"], d["market_trades"], d["position"], d["observations"])
         return d
     
-def backtest(trader, trading_states: list[TradingState], use_local=True, use_reasons=True, parameters={}) -> list[Reaction]:
+def backtest(trader, trading_states: list[TradingState], use_p3=False, use_local=True, use_reasons=True, parameters={}) -> list[Reaction]:
     """
     Backtests a trader, outputs a list of {state, log, takes, makes}
 
@@ -536,28 +523,28 @@ def backtest(trader, trading_states: list[TradingState], use_local=True, use_rea
         # Start Simulation And Add Initial Bot Trades
         sim = Simulation(state)
         logged_trades = {}
-        own_trades = {product: [] for product in LISTINGS.keys()}
-        market_trades = {product: [] for product in LISTINGS.keys()}
-        positions = {product: state.position.get(product, 0) for product in LISTINGS.keys()}
+        own_trades = {product: [] for product in state.listings.keys()}
+        market_trades = {product: [] for product in state.listings.keys()}
+        positions = {product: state.position.get(product, 0) for product in state.listings.keys()}
 
         # Simulate My Trading
         if use_local:
             submitted_orders, _, local_traderData, logs = trader.local_run(state, local_traderData, parameters)
         else:
             (submitted_orders, _, traderData), logs = capture_prints(lambda: trader.run(state))
+        parsed_logs: dict[str, object] = logs if use_local else json.loads(logs, cls=MyP4Decoder) # type: ignore
+        logged_orders: dict[str, list[Order]] = parsed_logs["orders"] # type: ignore
         if use_reasons:
-            parsed_logs: dict[str, object] = logs if use_local else json.loads(logs, cls=MyP4Decoder) # type: ignore
-            logged_orders: dict[str, list[tuple[Order, str]]] = parsed_logs["orders"] # type: ignore
-            for product, orders in logged_orders.items():
-                for order, reason in orders:
+            for reason, orders in logged_orders.items():
+                for order in orders:
                     for match in sim.fill(order, "SUBMISSION", reason):
-                        trade = match.to_trade(product, state.timestamp)
+                        trade = match.to_trade(order.symbol, state.timestamp)
                         if reason not in logged_trades:
                             logged_trades[reason] = []
                         logged_trades[reason].append(trade)
-                        own_trades[product].append(trade)
+                        own_trades[order.symbol].append(trade)
                         direction = 1 if trade.buyer == "SUBMISSION" else -1
-                        positions[product] += trade.quantity * direction
+                        positions[order.symbol] += trade.quantity * direction
         else:
             for product, orders in submitted_orders.items():
                 for order in orders:
@@ -650,16 +637,18 @@ def backtest(trader, trading_states: list[TradingState], use_local=True, use_rea
                     market_trades[product].append(trade)
 
         # Enforce Position Limits
-        for product in LISTINGS.keys():
+        position_limits = P3_POSITION_LIMITS if use_p3 else P4_POSITION_LIMITS
+        for product in state.listings.keys():
             position = positions.get(product, 0)
-            if abs(position) > POSITION_LIMITS[product]:
+            if abs(position) > position_limits[product]:
                 sys.exit(f"Position Exceeded Limits at {state.timestamp} for {product}: {position}")
         
         # Push Results
         reactions.append(Reaction(
             input_state=state,
             log=logs,
-            trades=logged_trades
+            orders=logged_orders,
+            trades=logged_trades,
         ))
 
         # Generate Next State
@@ -667,7 +656,7 @@ def backtest(trader, trading_states: list[TradingState], use_local=True, use_rea
             state = TradingState(
                 traderData="" if use_local else traderData, # type: ignore
                 timestamp=trading_states[i+1].timestamp,
-                listings=LISTINGS,
+                listings=state.listings,
                 order_depths=trading_states[i+1].order_depths,
                 own_trades=own_trades,
                 market_trades=market_trades,
@@ -680,9 +669,11 @@ def backtest(trader, trading_states: list[TradingState], use_local=True, use_rea
 class PnlAccount:
     def __init__(self):
         self.cash = 0
-        self.positions = {p: 0 for p in LISTINGS.keys()}
+        self.positions = {}
 
     def trade(self, product, price, quantity):
+        if product not in self.positions:
+            self.positions[product] = 0
         self.positions[product] += quantity
         self.cash -= price * quantity
     
@@ -690,25 +681,21 @@ class PnlAccount:
         positions_value = sum([position * product_values[product] for product, position in self.positions.items()])
         return self.cash + positions_value
 
-def get_pnls_from_trading_states(states: list[TradingState]):
+def get_final_pnl_from_trading_states(states: list[TradingState]):
     """DEPRECATED"""
 
-    pnls = {p: {} for p in LISTINGS.keys()}
-    sims = {p: PnlAccount() for p in LISTINGS.keys()}
+    sim = PnlAccount()
     for state in states:
         # Update Positions
         for product, trades in state.own_trades.items():
             for trade in trades:
                 multiplier = 1 if trade.buyer == "SUBMISSION" else -1
-                sims[product].trade(product, trade.price, trade.quantity * multiplier)
+                sim.trade(product, trade.price, trade.quantity * multiplier)
         
         # Calculate Pnl
-        fair_prices = {get_wall_mid(state.order_depths[product]) for product in LISTINGS.keys()}
-        for product in LISTINGS.keys():
-            pnls[product][state.timestamp] = sims[product].get_pnl(fair_prices)
-    
-    return pnls
-        
+    fair_prices = {get_wall_mid(states[-1].order_depths[product]) for product in sim.positions.keys()}
+    return sim.get_pnl(fair_prices)
+
 def get_pnls_from_reactions(reactions: list[Reaction]) -> list[dict[str, int]]:
     """
     Returns a list of a dictionary that maps reason of trade to cumulative pnl.
@@ -720,7 +707,7 @@ def get_pnls_from_reactions(reactions: list[Reaction]) -> list[dict[str, int]]:
     pnls: list[dict[str, int]] = []
     pnl = {}
     for reaction in reactions:
-        fair_prices = {p: get_wall_mid(reaction.input_state.order_depths[p]) for p in LISTINGS.keys()}
+        fair_prices = {k: get_wall_mid(v) for k,v in reaction.input_state.order_depths.items()}
         for reason, trades in reaction.trades.items():
             for trade in trades:
                 multiplier = 1 if trade.buyer == "SUBMISSION" else -1
@@ -761,23 +748,27 @@ def calculate_exponential_moving_average(l, window, multiplier, pad_front=None):
         d.appendleft(li)
         if len(d) > window:
             d.pop()
-        ms = 0
-        m = 0
+        ms,m = 0,0
         for i in range(len(d)):
             ms += d[i] * multiplier_v[i]
             m += multiplier_v[i]
         mas.append(ms / m)
-
     return mas
 
 
-def gridsearch_parameters(trader, states: list[TradingState], parameters: dict[str, list[object]], metric_fn: Callable[[list[Reaction]], object]):
+def gridsearch_parameters(trader, states: list[TradingState], parameters: dict[str, list[object]], metric_fn: Callable[[list[Reaction]], object], use_p3=False):
+    """
+    Example Usage:
+
+    grid_search_parameters()
+    """
+
     results = []
 
     combs = [dict(zip(parameters.keys(), comb)) for comb in itertools.product(*parameters.values())]
 
     for comb in combs:
-        reactions = backtest(trader, states, use_local=True, use_reasons=True, parameters=comb)
+        reactions = backtest(trader, states, use_p3, use_local=True, use_reasons=True, parameters=comb)
         metric = metric_fn(reactions)
         results.append((metric, comb))
 
