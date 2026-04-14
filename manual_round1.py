@@ -9,7 +9,6 @@ def resolve(bids, asks, my_p, my_q):
         bid_q = sum([q for p,q in executed_bids]) + (my_q if my_p >= price and my_q > 0 else 0)
         ask_q = sum([q for p,q in executed_asks]) + (-my_q if my_p <= price and my_q < 0 else 0)
         volume = min(bid_q, ask_q)
-        print(volume)
         if volume > max_volume:
             max_volume = volume
             clearing_price = price
@@ -33,7 +32,7 @@ def resolve2(bids, asks, my_p, my_q):
         bid_q = sum([q for p,q in executed_bids]) + (my_q if my_p >= price and my_q > 0 else 0)
         ask_q = sum([q for p,q in executed_asks]) + (-my_q if my_p <= price and my_q < 0 else 0)
         volume = min(bid_q, ask_q)
-        print(volume)
+        # print(price, volume)
         if volume > max_volume:
             max_volume = volume
             clearing_price = price
@@ -62,7 +61,7 @@ asks = [
 ]
 
 bids2 = [
-    (20, 4.3),
+    (20, 43),
     (19, 17),
     (18, 6),
     (17, 5),
@@ -82,21 +81,23 @@ asks2 = [
     (19, 12),
 ]
 
+print(resolve2(bids2, asks2, 17, 19.999))
 
-evals = []
-
-for p in set([p for p,q in bids] + [p for p,q in asks]):
-    for q in range(-200,201):
-        clearing_price, pnl = resolve(bids, asks, p, q)
-        evals.append((pnl, p, q, clearing_price))
-print(sorted(evals, key=lambda x: x[0]))
+# evals = []
+# # import numpy as np
+# # for p in set([p for p,q in bids] + [p for p,q in asks]):
+# #     for q in range(-200,201):
+# #         clearing_price, pnl = resolve(bids, asks, p, q)
+# #         evals.append((pnl, p, q, clearing_price))
+# # print(sorted(evals, key=lambda x: x[0]))
 
 # for p in set([p for p,q in bids2] + [p for p,q in asks2]):
-#     for q in range(-200,201):
+#     for q in range(-100000, 100001):
+#         q = q / 1000
 #         clearing_price, pnl = resolve2(bids2, asks2, p, q)
 #         evals.append((pnl, p, q, clearing_price))
-# print(sorted(evals, key=lambda x: x[0]))
+# print(sorted(evals, key=lambda x: x[0])[-1])
 
 
 # (p=31, q=9) -> 9 optimal
-# (p=20, q=58) -> 226.58 optimal
+# (p=20, q=58.699) -> 226.58 optimal

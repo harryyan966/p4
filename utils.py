@@ -888,7 +888,6 @@ def gridsearch_parameters(trader, states: list[TradingState], parameters: dict[s
         results.append((metric, comb))
 
     return sorted(results, key=lambda x: x[0])
-
 def get_pnl_from_trades(trades: list[Trade], mids: list[float]):
     print(f"Getting Pnl from {len(trades)} trades.")
     cash = 0
@@ -914,3 +913,8 @@ def fill_forward(l):
             l[i] = l[i-1]
     return l
 
+def fill_backward(l):
+    for i in range(len(l)-2,-1,-1):
+        if l[i] is None:
+            l[i] = l[i+1]
+    return l

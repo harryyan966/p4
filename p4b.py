@@ -4,34 +4,37 @@ import numpy as np
 from utils import *
 from p4 import Trader, PARAMETERS
 
-PLOT_MID = True
+PLOT_MID = False
 PLOT_POSITION = True
-PLOT_ORDERBOOK = False
+PLOT_ORDERBOOK = True
 PLOT_BOT_TRADES = True
 def plot_own_trade(trade):
     return True
 
 # bt_states = get_trading_states_from_log("117560")
 bt_states = get_trading_states_from_data("data_p4/round1", [0, 1, 2], use_p3=False, use_cache=True)
-bt_results = local_backtest(Trader(), bt_states, use_p3=False, parameters=PARAMETERS)
+bt_parameters = deepcopy(PARAMETERS)
+bt_parameters["trade_pepper_roots"]["day"] = 0
+bt_results = local_backtest(Trader(), bt_states, use_p3=False, parameters=bt_parameters)
 states = [r.input_state for r in bt_results]
 pnl = [sum(p.values()) if None not in p.values() else None for p in get_pnls_from_reactions(bt_results)]
-# product = "INTARIAN_PEPPER_ROOT"
-product = "ASH_COATED_OSMIUM"
+product = "INTARIAN_PEPPER_ROOT"
+# product = "ASH_COATED_OSMIUM"
 # making_positions = [int(r.logs["trade_tomatoes"]["making position"]) for r in bt_results]
 # print(bt_results[-1].logs)
 timestamps = [s.timestamp for s in states]
-mids = fill_forward([get_strict_wall_mid(s.order_depths[product]) for s in states])
+mids = fill_backward(fill_forward([get_strict_wall_mid(s.order_depths[product]) for s in states]))
+assert None not in mids
 positions = [s.position.get(product, 0) for s in states]
 
-# window = PARAMETERS["tomato ma window"]
-# window = 1
-# ma_pos = np.convolve(mids, np.ones(window)/window, mode='valid') # type: ignore
+window = PARAMETERS["trade_osmium"]["ma_window"]
+ma_pos = calculate_moving_average(mids, window=window, pad_front=None)
 # ma_timestamps = timestamps[window-1:]
 
 
-baseline = [0] * len(states)
-# baseline = np.array(timestamps)* 0.001 + 10000
+# baseline = [0] * len(states)
+# baseline = ma_pos
+baseline = np.array(timestamps)* 0.001 + 10000
 baseline = np.array(baseline)
 def rel(values):
     return [v-b if v is not None else None for v, b in zip(values, baseline)]
