@@ -33,21 +33,20 @@ python -m line_profiler your_script.lprof
 
 ## TODO
 
+### Separate logs in backtester, separate parameters in backtester
+
 ### manual trading monte carlo simulation (For Manual Rounds (They are worth A LOT))
 
-**Assigned to Max**
-
-implement the monte carlo simulation thing shown in the frankfurt hedgehogs' github
+We'll build it when we see the actual challenge.
 
 ### black scholes (For Option Round (round3 last year))
 
-**Assigned to Harry (I've done it last year)**
-
-There WILL be an options round, implement curve fitting and options formulas to calculate implied volatility
+Tests on prosperity 3
+1. Far from strike premium: Regress moneyness (log(K/S) / sqrt(TTE) and Implied volatility (sigma s.t. bs(S, TTE, sigma) == price)
+2. Use bs(S, TTE, TheoImpliedVol(price)) as baseline, plot price against baseline
+3. Evaluate feasibility of moving average premium
 
 ### mean-reversion detector & parameter finder (For All Instruments with a fair value that we want to exploit)
-
-**Assigned to Harry (I'm interested in this)**
 
 Given a series of prices (perhaps relative to a mean level) and detect whether if exhibits mean-reversion patterns and the threshold & window we should use. 
 
@@ -57,9 +56,13 @@ One more important insight in mean-reversion exploitation: the mean MUST be hedg
 
 ### Understand conversions API and upgrade backtester (For Conversion Rounds)
 
-**Assigned to Harry (I'm familiar with the backtester)**
+Remember in the actual rounds submit weird parameters with optimistic guesses to the official tester.
 
-The conversions round is probably far away but we need to get it because it probably makes a LOT of money. (last year it was the largest earner)
+Test first, verify after.
+
+Tests on prosperity 3
+1. Conversion Mechanics
+2. 
 
 ### research on solving position tilt (For Market Making in General)
 
