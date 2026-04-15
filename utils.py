@@ -16,19 +16,6 @@ import os
 import heapq
 from p4 import P4_POSITION_LIMITS
 
-# P4_LISTINGS = {
-#     "EMERALDS": Listing(
-#         symbol="EMERALDS",
-#         product="EMERALDS",
-#         denomination="1"
-#     ),
-#     "TOMATOES": Listing(
-#         symbol="TOMATOES",
-#         product="TOMATOES",
-#         denomination="1"
-#     ),
-# }
-
 P4_LISTINGS = {k: Listing(k, k, "1") for k in P4_POSITION_LIMITS.keys()}
 
 
@@ -54,7 +41,7 @@ P3_LISTINGS = {k: Listing(k, k, "1") for k in P3_POSITION_LIMITS.keys()}
 
 GLOBAL_MAX_TIMESTAMP = 9_000_000
 
-def load_trading_states_from_data(data_loc, days, base_listings, min_timestamp = 0, max_timestamp = GLOBAL_MAX_TIMESTAMP) -> list[TradingState]:
+def load_trading_states_from_data(data_loc, days, use_p3, min_timestamp = 0, max_timestamp = GLOBAL_MAX_TIMESTAMP) -> list[TradingState]:
     """
     Loads a list of TradingStates from provided data files.
     """
@@ -67,15 +54,24 @@ def load_trading_states_from_data(data_loc, days, base_listings, min_timestamp =
         trades_path = os.path.normpath(f"{data_loc}/trades{day}.csv")
         price = pd.read_csv(prices_path, sep=";")
         trade = pd.read_csv(trades_path, sep=";")
-        price["timestamp"] = day * 1000000 + price["timestamp"]
-        trade["timestamp"] = day * 1000000 + trade["timestamp"]
+        price["timestamp"] = (day-min(days)) * 1000000 + price["timestamp"]
+        trade["timestamp"] = (day-min(days)) * 1000000 + trade["timestamp"]
         price_dfs.append(price)
         trade_dfs.append(trade)
     prices_df = pd.concat(price_dfs)
     trades_df = pd.concat(trade_dfs)
     prices_df = prices_df[(prices_df["timestamp"] <= max_timestamp) & (prices_df["timestamp"] >= min_timestamp)]
     trades_df = trades_df[(trades_df["timestamp"] <= max_timestamp) & (trades_df["timestamp"] >= min_timestamp)]
+    return get_trading_states_from_dfs(prices_df, trades_df, use_p3)
 
+def load_trading_states_from_log(log_id):
+    with open(f"logs/{log_id}/{log_id}.log") as f:
+        data = json.loads(f.read())
+    prices_df = pd.read_csv(io.StringIO(data["activitiesLog"]), sep=";")
+    trades_df = pd.DataFrame(data["tradeHistory"])
+    return get_trading_states_from_dfs(prices_df, trades_df, use_p3=False)
+
+def get_trading_states_from_dfs(prices_df, trades_df, use_p3):
     trading_states: list[TradingState] = []
 
     # Deserialize trades
@@ -87,8 +83,12 @@ def load_trading_states_from_data(data_loc, days, base_listings, min_timestamp =
             all_trades[timestamp] = {}
         if product not in all_trades[timestamp]:
             all_trades[timestamp][product] = []
-        buyer = "" if np.isnan(trade.get("buyer", "")) else trade.get("buyer", "")
-        seller = "" if np.isnan(trade.get("seller", "")) else trade.get("seller", "")
+        buyer = trade.get("buyer", "")
+        if type(buyer) != str:
+            buyer = ""
+        seller = trade.get("seller", "")
+        if type(seller) != str:
+            seller = ""
 
         all_trades[timestamp][product].append(Trade(
             timestamp=trade.get('timestamp'), # type: ignore
@@ -121,7 +121,7 @@ def load_trading_states_from_data(data_loc, days, base_listings, min_timestamp =
 
     # Deserialize prices
     products = prices_df["product"].unique()
-    listings = {k: v for k, v in base_listings.items() if k in products}
+    listings = {k: v for k, v in (P3_LISTINGS if use_p3 else P4_LISTINGS).items() if k in products}
     for timestamp, rows in tqdm(prices_df.groupby("timestamp"), total=prices_df["timestamp"].nunique(), desc="Generating Trading States"): # type: ignore
         books = {row.get("product", ""): row for _, row in rows.iterrows()}
         trades_now = all_trades.get(timestamp-100, {})
@@ -134,13 +134,17 @@ def load_trading_states_from_data(data_loc, days, base_listings, min_timestamp =
             order_depths[product] = order_depth
         
         own_trades = {}
-
         market_trades = {}
         for product, trades in trades_now.items():
-            if product not in market_trades:
-                market_trades[product] = []
             for trade in trades:
-                market_trades[product].append(trade)
+                if trade.buyer == "SUBMISSION" or trade.seller == "SUBMISSION":
+                    if product not in own_trades:
+                        own_trades[product] = []
+                    own_trades[product].append(trade)
+                else:
+                    if product not in market_trades:
+                        market_trades[product] = []
+                    market_trades[product].append(trade)
         
         position = {}
 
@@ -463,24 +467,26 @@ def get_trading_states_from_data(data_loc, days, use_p3=False, min_t=0, max_t=GL
             return trading_states
         except FileNotFoundError:
             pass
-    trading_states: list[TradingState] = [get_relevant_state(s) for s in load_trading_states_from_data(data_loc, days, base_listings, min_t, max_t)]
+    trading_states: list[TradingState] = [get_relevant_state(s) for s in load_trading_states_from_data(data_loc, days, use_p3, min_t, max_t)]
     cache_path = os.path.normpath(f"cache/{data_loc}/states_{days}_{min_t}-{max_t}.cache")
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with open(cache_path, "w") as f:
         f.write(json.dumps(trading_states, cls=MyP4Encoder)) # type: ignore
     return trading_states
 
-def get_trading_states_from_log(log_id, min_t = 0, max_t = GLOBAL_MAX_TIMESTAMP):
-    try:
-        with open(f"cache/log_{log_id}_states{min_t}-{max_t}.cache") as f:
-            trading_states: list[TradingState] = [correct_state(s) for s in json.loads(f.read(), cls=MyP4Decoder)] # type: ignore
-        return trading_states
-    except FileNotFoundError:
-        states = sorted([l.state for l in parse_log_strings(get_log_strings(log_id)).values()], key=lambda s: s.timestamp)
-        trading_states: list[TradingState] = [get_relevant_state(s) for s in states]
-        with open(f"cache/log_{log_id}_states{min_t}-{max_t}.cache", "w") as f:
-            f.write(json.dumps(trading_states, cls=MyP4Encoder)) # type: ignore
-        return trading_states
+def get_trading_states_from_log(log_id, use_cache=True):
+    if use_cache:
+        try:
+            with open(f"cache/log_{log_id}_states.cache") as f:
+                trading_states: list[TradingState] = [correct_state(s) for s in json.loads(f.read(), cls=MyP4Decoder)] # type: ignore
+            return trading_states
+        except FileNotFoundError:
+            pass
+    states = load_trading_states_from_log(log_id)
+    trading_states: list[TradingState] = [get_relevant_state(s) for s in states]
+    with open(f"cache/log_{log_id}_states.cache", "w") as f:
+        f.write(json.dumps(trading_states, cls=MyP4Encoder)) # type: ignore
+    return trading_states
 
 class Reaction(NamedTuple):
     input_state: TradingState # state seen by trader
@@ -537,8 +543,8 @@ def local_backtest(trader, trading_states: list[TradingState], use_p3=False, par
         market_trades = {}
         positions = {product: state.position.get(product, 0) for product in state.listings.keys()}
         orders, _, traderdata, logs = trader.local_run(state, traderdata, parameters)   
-        for reason, orders in orders.items():
-            for order in orders:
+        for reason, reason_orders in orders.items():
+            for order in reason_orders:
                 for match in sim.fill(order, "SUBMISSION", reason):
                     trade = match.to_trade(order.symbol, state.timestamp)
                     if reason not in trades_by_reason:
@@ -797,7 +803,11 @@ class PnlAccount:
     def get_pnl(self, product_values):
         if None in product_values.values():
             return None
-        positions_value = sum([position * product_values[product] for product, position in self.positions.items()])
+        positions_value = 0
+        for product, position in self.positions.items():
+            if product_values[product] is None:
+                return None
+            positions_value += position * product_values[product]
         return self.cash + positions_value
 
 def get_final_pnl_from_trading_states(states: list[TradingState]):
@@ -826,7 +836,7 @@ def get_pnls_from_reactions(reactions: list[Reaction]) -> list[dict[str, int]]:
     pnls: list[dict[str, int]] = []
     pnl = {}
     for reaction in reactions:
-        fair_prices = {k: get_wall_mid(v) for k,v in reaction.input_state.order_depths.items()}
+        fair_prices = {k: get_strict_wall_mid(v) for k,v in reaction.input_state.order_depths.items()}
         for reason, trades in reaction.trades.items():
             for trade in trades:
                 multiplier = 1 if trade.buyer == "SUBMISSION" else -1
@@ -879,15 +889,13 @@ def gridsearch_parameters(trader, states: list[TradingState], parameters: dict[s
     """TODO: fix this"""
 
     results = []
-
     combs = [dict(zip(parameters.keys(), comb)) for comb in itertools.product(*parameters.values())]
-
     for comb in tqdm(combs):
         reactions = local_backtest(trader, states, use_p3, parameters=comb, show_progress=False)
         metric = metric_fn(reactions)
         results.append((metric, comb))
-
     return sorted(results, key=lambda x: x[0])
+
 def get_pnl_from_trades(trades: list[Trade], mids: list[float]):
     print(f"Getting Pnl from {len(trades)} trades.")
     cash = 0

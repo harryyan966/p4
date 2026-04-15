@@ -81,6 +81,7 @@ asks2 = [
     (19, 12),
 ]
 
+print(resolve(bids, asks, 30, 9.999))
 print(resolve2(bids2, asks2, 17, 19.999))
 
 # evals = []
@@ -99,5 +100,5 @@ print(resolve2(bids2, asks2, 17, 19.999))
 # print(sorted(evals, key=lambda x: x[0])[-1])
 
 
-# (p=31, q=9) -> 9 optimal
-# (p=20, q=58.699) -> 226.58 optimal
+# (p=30, q=9.999) -> 9 optimal
+# (p=20, q=19.999) -> 226.58 optimal

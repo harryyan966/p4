@@ -39,6 +39,7 @@ class SortedList:
 
 class Simulation:
     def __init__(self, product, state: TradingState):
+        self.timestamp = state.timestamp
         self.product = product
         self.position_limit = P3_POSITION_LIMITS[product]
         self.position = state.position.get(product, 0)
@@ -141,13 +142,31 @@ class Simulation:
         p,q,r = self.asks[i]
         return p
     
-    def ask_wall(self):
-        return max([p for p,q,r in self.asks])
+    def take_all_bids(self, reason, max_q, min_p=None):
+        target_ask_quota = max(0, self.ask_quota - max_q)
+        while self.bids and self.ask_quota > target_ask_quota and (min_p is None or self.best_bid() >= min_p):
+            self.take_best_bid(reason, self.ask_quota - target_ask_quota)
+        return self.ask_quota - target_ask_quota
     
-    def bid_wall(self):
-        return min([p for p,q,r in self.bids])
+    def take_all_asks(self, reason, max_q, max_p=None):
+        target_bid_quota = max(0, self.bid_quota - max_q)
+        while self.asks and self.bid_quota > target_bid_quota and (max_p is None or self.best_ask() <= max_p):
+            self.take_best_ask(reason, self.bid_quota - target_bid_quota)
+        return self.bid_quota - target_bid_quota
     
-    def wall_mid(self):
+    def execute(self, p_thres, q, r):
+        if q < 0:
+            return self.take_all_bids(r, max_q=-q, min_p=p_thres)
+        if q > 0:
+            return self.take_all_asks(r, max_q=-q, max_p=p_thres)
+    
+    def ask_wall(self) -> int|None:
+        return max([p for p,q,r in self.asks]) if self.asks else None
+    def bid_wall(self) -> int|None:
+        return min([p for p,q,r in self.bids]) if self.bids else None
+    def wall_mid(self) -> float|None:
+        if self.ask_wall() is None or self.bid_wall() is None:
+            return None
         return (self.ask_wall() + self.bid_wall()) / 2
 
     def add_order(self, p, q, r):
@@ -157,29 +176,20 @@ class BaseTrader:
     def get_runners(self):
         return []
 
-    def local_run(self, state: TradingState, old_trader_data: dict[str, dict[str, Any]], parameters: dict[str, Any]) -> tuple[dict[Symbol, list[Order]], int, dict[str, dict[str, Any]], dict[str, Any]]:
-        """
-        State in, orders out.
-        """
-
-        logged_orders: dict[str, list[Order]] = {}
-        submitted_orders: dict[str, list[Order]] = {p: [] for p in state.listings.keys()}
-        new_trader_data: dict[str, dict[str, Any]] = {}
-        runners: list[tuple[str, Callable[[TradingState, dict[str, Any], dict[str, Any]], tuple[list[tuple[Order, str]], dict[str, Any]]]]] = self.get_runners()
-        for label, runner in runners:
+    def local_run(self, state: TradingState, old_trader_data, parameters):
+        sims = {product: Simulation(product, state) for product in state.listings.keys()}
+        new_trader_data = {}
+        orders = {}
+        logs = {}
+        for label, runner in self.get_runners():
             trader_data = old_trader_data.get(label, {})
-            orders, trader_data = runner(get_relevant_state(state), trader_data, parameters)
-            for order, reason in orders:
-                if reason not in logged_orders:
-                    logged_orders[reason] = []
-                logged_orders[reason].append(order)
-                submitted_orders[order.symbol].append(order)
+            trader_data, runner_logs = runner(sims, trader_data, parameters.get(label, {}))
+            logs[label] = runner_logs
             new_trader_data[label] = trader_data
-        
-        logs = {
-            "state": state,
-            "orders": logged_orders,
-        }
-
-        return submitted_orders, 0, new_trader_data, logs
+        for sim in sims.values():
+            for order, reason in sim.orders:
+                if reason not in orders:
+                    orders[reason] = []
+                orders[reason].append(order)
+        return orders, 0, new_trader_data, logs
     

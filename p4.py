@@ -134,6 +134,16 @@ class Simulation:
     def best_ask(self, i=0) -> int:
         p,q,r = self.asks[i]
         return p
+    def take_all_bids(self, reason, max_q, min_p=None):
+        target_ask_quota = max(0, self.ask_quota - max(0,max_q))
+        while self.bids and self.ask_quota > target_ask_quota and (min_p is None or self.best_bid() >= min_p):
+            self.take_best_bid(reason, self.ask_quota - target_ask_quota)
+        return self.ask_quota - target_ask_quota
+    def take_all_asks(self, reason, max_q, max_p=None):
+        target_bid_quota = max(0, self.bid_quota - max(0,max_q))
+        while self.asks and self.bid_quota > target_bid_quota and (max_p is None or self.best_ask() <= max_p):
+            self.take_best_ask(reason, self.bid_quota - target_bid_quota)
+        return self.bid_quota - target_bid_quota
     def ask_wall(self) -> int|None:
         return max([p for p,q,r in self.asks]) if self.asks else None
     def bid_wall(self) -> int|None:
@@ -153,81 +163,28 @@ def trade_pepper_roots(state, data_dict, parameters):
     sim = Simulation(product="INTARIAN_PEPPER_ROOT", state=state)
     time = state.timestamp//100 + parameters["day"] * 10000
     mid = time * 0.1 + 10000
-    # exp_bid = int(mid - 5 - time * (1.5 / (30000-1)))
     exp_ask = int(mid + 6 + time * (1.5 / (30000-1)))
-    buffer = 20
-    while sim.asks and sim.best_ask() <= exp_ask and sim.bid_quota > buffer:
-        sim.take_best_ask("take pepper roots", max_q=sim.bid_quota-buffer)
-    while sim.bids and sim.best_bid() > mid and sim.ask_quota > 0:
-        sim.take_best_bid("take pepper roots", max_q=sim.ask_quota)
-    while sim.asks and sim.best_ask() < mid and sim.bid_quota > 0:
+    while sim.asks and sim.best_ask() <= exp_ask and sim.bid_quota > 0:
         sim.take_best_ask("take pepper roots", max_q=sim.bid_quota)
     return sim.orders, data_dict, {}
 
-class OsmiumData:
-    def __init__(self, data_dict, parameters):
-        self.prev_prices = data_dict.get("prev_prices", [])
-        self.parameters = parameters
-        self.moving_average = None
-    def update_moving_average(self, mid):
-        self.prev_prices.append(mid)
-        if len(self.prev_prices) > self.parameters["ma_window"]:
-            self.prev_prices.pop(0)
-        without_none = [p for p in self.prev_prices if p is not None]
-        if len(without_none) != 0:
-            self.moving_average = sum(without_none) / len(without_none)
-    def to_dict(self):
-        return {
-            "prev_prices": self.prev_prices
-        }
-OSMIUM_PARAMS = {"ma window": 50, "threshold": 3}
+OSMIUM_PARAMS = {"spread": 5}
 def trade_osmium(state, data_dict, parameters):
     sim = Simulation(product="ASH_COATED_OSMIUM", state=state)
-    data = OsmiumData(data_dict, parameters)
-    mid = sim.strict_wall_mid()
-    data.update_moving_average(mid)
     fair = 10000
-    threshold = parameters["threshold"]
-    buy_threshold = fair - threshold
-    sell_threshold = fair + threshold
-    if fair is None:
-        return sim.orders, data.to_dict(), {}
-    while sim.asks and sim.best_ask() < buy_threshold and sim.bid_quota > 0:
-        sim.take_best_ask("take osmium", max_q=sim.bid_quota)
-    while sim.bids and sim.best_bid() > sell_threshold and sim.ask_quota > 0:
-        sim.take_best_bid("take osmium", max_q=sim.ask_quota)
+    spread = parameters["spread"]
+    sim.take_all_asks("osmium=10000", max_q=sim.bid_quota, max_p=fair-1)
+    sim.take_all_asks("flat osmium", max_q=-sim.position, max_p=fair)
+    sim.take_all_bids("osmium=10000", max_q=sim.ask_quota, min_p=fair+1)
+    sim.take_all_bids("flat osmium", max_q=sim.position, min_p=fair)
     for p,q,r in sim.bids:
-        if p + 1 < fair:
-            sim.bid(p + 1, sim.bid_quota, "make pepper roots")
+        if p + 1 < fair-spread+1:
+            sim.bid(p + 1, sim.bid_quota, "osmium low oscillation around 10000")
             break
     for p,q,r in sim.asks:
-        if p - 1 > fair:
-            sim.ask(p - 1, sim.ask_quota, "make pepper roots")
-    return sim.orders, data.to_dict(), {}
-
-def trade_osmium_old(state, data_dict, parameters):
-    sim = Simulation(product="ASH_COATED_OSMIUM", state=state)
-    data = OsmiumData(data_dict, parameters)
-    mid = sim.strict_wall_mid()
-    data.update_moving_average(mid)
-    fair = 10000
-    threshold = parameters["threshold"]
-    buy_threshold = fair - threshold
-    sell_threshold = fair + threshold
-    if fair is None:
-        return sim.orders, data.to_dict(), {}
-    while sim.asks and sim.best_ask() < buy_threshold and sim.bid_quota > 0:
-        sim.take_best_ask("take osmium", max_q=sim.bid_quota)
-    while sim.bids and sim.best_bid() > sell_threshold and sim.ask_quota > 0:
-        sim.take_best_bid("take osmium", max_q=sim.ask_quota)
-    for p,q,r in sim.bids:
-        if p + 1 < fair:
-            sim.bid(p + 1, sim.bid_quota, "make pepper roots")
-            break
-    for p,q,r in sim.asks:
-        if p - 1 > fair:
-            sim.ask(p - 1, sim.ask_quota, "make pepper roots")
-    return sim.orders, data.to_dict(), {}
+        if p - 1 > fair+spread-1:
+            sim.ask(p - 1, sim.ask_quota, "osmium low oscillation around 10000")
+    return sim.orders, data_dict, {}
 
 def get_relevant_state(state: TradingState):
     relevant_own_trades = {}
@@ -253,8 +210,8 @@ PARAMETERS = {
 class Trader:
     def get_runners(self):
         return [
-            # ("trade_osmium", trade_osmium),
             ("trade_pepper_roots", trade_pepper_roots),
+            ("trade_osmium", trade_osmium),
         ]
     def local_run(self, state, old_trader_data, parameters):
         new_trader_data = {}
