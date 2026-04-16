@@ -8,6 +8,8 @@ P4_POSITION_LIMITS = {
     "ASH_COATED_OSMIUM": 80,
 }
 
+SILENCE_EXCEPTIONS = False
+
 class MyP4Encoder(json.JSONEncoder):
     def default(self, o):
         d = o.__dict__.copy()
@@ -54,7 +56,7 @@ class Simulation:
             self.bid(p,q,"")
         for p,q in order_depths.sell_orders.items():
             self.ask(p,-q,"")
-    def ask(self, p, q, r) -> None:
+    def ask(self, p: int, q, r) -> None:
         """Pass a positive q"""
         if r:
             q = min(q, self.ask_quota)
@@ -72,8 +74,8 @@ class Simulation:
                     self.ask_quota -= q
                     self.add_order(p, -q, r)
                 break
-            if r and br:
-                raise Exception("Your own trades have crossed.")
+            if r and br and not SILENCE_EXCEPTIONS:
+                raise Exception(f"Your own trades have crossed: {self.orders} {(p,q,r)}.")
             if bq > q: # best bid can absorb our order
                 self.bids.replacetop((bp, bq-q, br))
                 if r:
@@ -88,7 +90,7 @@ class Simulation:
                     self.ask_quota -= bq
                     self.add_order(bp, -bq, r)
                 q -= bq
-    def bid(self, p, q, r) -> None:
+    def bid(self, p: int, q, r) -> None:
         """Pass a positive q"""
         if r:
             q = min(q, self.bid_quota)
@@ -134,12 +136,12 @@ class Simulation:
     def best_ask(self, i=0) -> int:
         p,q,r = self.asks[i]
         return p
-    def take_all_bids(self, reason, max_q, min_p=None):
+    def take_all_bids(self, reason, max_q, min_p: int|None=None):
         target_ask_quota = max(0, self.ask_quota - max(0,max_q))
         while self.bids and self.ask_quota > target_ask_quota and (min_p is None or self.best_bid() >= min_p):
             self.take_best_bid(reason, self.ask_quota - target_ask_quota)
         return self.ask_quota - target_ask_quota
-    def take_all_asks(self, reason, max_q, max_p=None):
+    def take_all_asks(self, reason, max_q, max_p: int|None=None):
         target_bid_quota = max(0, self.bid_quota - max(0,max_q))
         while self.asks and self.bid_quota > target_bid_quota and (max_p is None or self.best_ask() <= max_p):
             self.take_best_ask(reason, self.bid_quota - target_bid_quota)
@@ -155,23 +157,44 @@ class Simulation:
     def add_order(self, p, q, r) -> None:
         self.orders.append((Order(symbol=self.product, price=p, quantity=q), r))
 
-PEPPER_ROOTS_PARAMS = {
-    "buffer": 5,
-    "day": 2,
-}
 def trade_pepper_roots(state, data_dict, parameters):
     sim = Simulation(product="INTARIAN_PEPPER_ROOT", state=state)
-    time = state.timestamp//100 + parameters["day"] * 10000
-    mid = time * 0.1 + 10000
-    exp_ask = int(mid + 6 + time * (1.5 / (30000-1)))
-    while sim.asks and sim.best_ask() <= exp_ask and sim.bid_quota > 0:
+    while len(sim.asks) > 1 and sim.bid_quota > 0:
         sim.take_best_ask("take pepper roots", max_q=sim.bid_quota)
     return sim.orders, data_dict, {}
-
-OSMIUM_PARAMS = {"spread": 5}
+OSMIUM_PARAMS = {"ma_window": 20, "spread": 5}
+class OsmiumData:
+    def __init__(self, data_dict, parameters):
+        self.prev_prices = data_dict.get("prev_prices", [])
+        self.parameters = parameters
+        self.moving_average = None
+    def update_moving_average(self, mid):
+        self.prev_prices.append(mid)
+        if len(self.prev_prices) > self.parameters["ma_window"]:
+            self.prev_prices.pop(0)
+        without_none = [p for p in self.prev_prices if p is not None]
+        if len(without_none) != 0:
+            # ws = 0
+            # tw = 0
+            # weight = 1
+            # for i in range(len(without_none)-1,-1,-1):
+            #     ws += weight * without_none[i]
+            #     tw += weight
+            #     weight *= 0.95
+            # self.moving_average = ws / tw
+            self.moving_average = sum(without_none) / len(without_none)
+    def to_dict(self):
+        return {
+            "prev_prices": self.prev_prices
+        }
 def trade_osmium(state, data_dict, parameters):
     sim = Simulation(product="ASH_COATED_OSMIUM", state=state)
-    fair = 10000
+    data = OsmiumData(data_dict, parameters)
+    data.update_moving_average(sim.strict_wall_mid())
+    fair = data.moving_average
+    if fair is None:
+        return sim.orders, data.to_dict(), {}
+    fair = round(fair)
     spread = parameters["spread"]
     sim.take_all_asks("osmium=10000", max_q=sim.bid_quota, max_p=fair-1)
     sim.take_all_asks("flat osmium", max_q=-sim.position, max_p=fair)
@@ -184,7 +207,8 @@ def trade_osmium(state, data_dict, parameters):
     for p,q,r in sim.asks:
         if p - 1 > fair+spread-1:
             sim.ask(p - 1, sim.ask_quota, "osmium low oscillation around 10000")
-    return sim.orders, data_dict, {}
+            break
+    return sim.orders, data.to_dict(), {}
 
 def get_relevant_state(state: TradingState):
     relevant_own_trades = {}
@@ -204,7 +228,6 @@ def get_relevant_state(state: TradingState):
         observations=state.observations
     )
 PARAMETERS = {
-    "trade_pepper_roots": PEPPER_ROOTS_PARAMS,
     "trade_osmium": OSMIUM_PARAMS,
 }
 class Trader:

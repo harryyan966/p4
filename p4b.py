@@ -6,19 +6,19 @@ from p4 import Trader, PARAMETERS
 
 PLOT_MID = True
 PLOT_POSITION = True
-PLOT_ORDERBOOK = True
+PLOT_ORDERBOOK = False
 PLOT_BOT_TRADES = True
+PLOT_OWN_TRADES = True
 def plot_own_trade(trade):
     return True
 
-bt_states = get_trading_states_from_log("117560", use_cache=False)
-print(pretty(bt_states[0]))
-# bt_states = get_trading_states_from_data("data_p4/round1", [0, 1, 2], use_p3=False, use_cache=True)
+# bt_states = get_trading_states_from_log("117560", use_cache=False)
+bt_states = get_trading_states_from_data("data_p4/round1", [2], use_p3=False, use_cache=False)
 bt_parameters = deepcopy(PARAMETERS)
-print(PARAMETERS)
-bt_parameters["trade_pepper_roots"]["day"] = 0
+print(bt_parameters)
 bt_results = local_backtest(Trader(), bt_states, use_p3=False, parameters=bt_parameters)
 states = [r.input_state for r in bt_results]
+print(len(states))
 pnl = [sum(p.values()) if None not in p.values() else None for p in get_pnls_from_reactions(bt_results)]
 # product = "INTARIAN_PEPPER_ROOT"
 product = "ASH_COATED_OSMIUM"
@@ -29,9 +29,9 @@ mids = fill_backward(fill_forward([get_strict_wall_mid(s.order_depths[product]) 
 assert None not in mids
 positions = [s.position.get(product, 0) for s in states]
 
-# window = PARAMETERS["trade_osmium"]["ma_window"]
-# ma_pos = calculate_moving_average(mids, window=window, pad_front=None)
-# ma_timestamps = timestamps[window-1:]
+window = PARAMETERS["trade_osmium"]["ma_window"]
+ma_pos = calculate_moving_average(mids, window=window, pad_front=None)
+ma_timestamps = timestamps[window-1:]
 
 
 baseline = [0] * len(states)
@@ -64,9 +64,10 @@ fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05,
                     specs=[[{"secondary_y": True}], [{"secondary_y": False}]])
 
 if PLOT_MID: fig.add_trace(go.Scatter(x=timestamps, y=rel(mids), name="mid", line=dict(color="blue")), row=1, col=1)
-fig.add_trace(go.Scatter(x=[t.timestamp for r,t in buy_trades], y=[rel_trade(t).price for r,t in buy_trades],
+if PLOT_OWN_TRADES:
+    fig.add_trace(go.Scatter(x=[t.timestamp for r,t in buy_trades], y=[rel_trade(t).price for r,t in buy_trades],
     mode="markers", marker=dict(symbol="triangle-up", color="green", size=8), name="buy", customdata=[[t.quantity, r] for r,t in buy_trades],hovertemplate="time: %{x}<br>price: %{y}<br>qty: %{customdata[0]}<br>reason: %{customdata[1]}"), row=1, col=1)
-fig.add_trace(go.Scatter(x=[t.timestamp for r,t in sell_trades], y=[rel_trade(t).price for r,t in sell_trades],
+    fig.add_trace(go.Scatter(x=[t.timestamp for r,t in sell_trades], y=[rel_trade(t).price for r,t in sell_trades],
     mode="markers", marker=dict(symbol="triangle-down", color="red", size=8), name="sell", customdata=[[t.quantity, r] for r,t in sell_trades],hovertemplate="time: %{x}<br>price: %{y}<br>qty: %{customdata[0]}<br>reason: %{customdata[1]}"), row=1, col=1)
 # fig.add_trace(go.Scatter(x=[t.timestamp for t in bot_trades], y=[t.price for t in bot_trades],
 #     mode="markers", marker=dict(symbol="triangle-up", color="purple", size=8), name="bot_buy", customdata=[[t.quantity] for t in bot_trades],hovertemplate="time: %{x}<br>price: %{y}<br>qty: %{customdata[0]}"), row=1, col=1)
@@ -76,8 +77,8 @@ if PLOT_POSITION: fig.add_trace(go.Scatter(x=timestamps, y=positions, name="posi
     row=1, col=1, secondary_y=True)
 # fig.add_trace(go.Scatter(x=timestamps, y=making_positions, name="making position", line=dict(color="cyan")),
     # row=1, col=1, secondary_y=True)
-# fig.add_trace(go.Scatter(x=ma_timestamps, y=rel(ma_pos), name="mid MA", line=dict(color="brown", dash="dash")),
-    # row=1, col=1, secondary_y=False)
+fig.add_trace(go.Scatter(x=ma_timestamps, y=rel(ma_pos), name="mid MA", line=dict(color="brown", dash="dash")),
+    row=1, col=1, secondary_y=False)
 fig.add_trace(go.Scatter(x=timestamps, y=pnl, name="pnl", line=dict(color="green")), row=2, col=1)
 
 # time = np.array(timestamps) // 100
