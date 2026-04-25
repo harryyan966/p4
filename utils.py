@@ -18,7 +18,6 @@ from p4 import P4_POSITION_LIMITS
 
 P4_LISTINGS = {k: Listing(k, k, "1") for k in P4_POSITION_LIMITS.keys()}
 
-
 P3_POSITION_LIMITS = {
     "RAINFOREST_RESIN": 50,
     "KELP": 50,
@@ -383,6 +382,10 @@ class QuoteHeap:
         self.total_size -= abs(quote.quantity)
         return quote
     
+    def to_list(self) -> list[Quote]:
+        """Doesn't Guarantee Order TODO guarantee order by replacing to sortedlist"""
+        return [q for p,c,q in self.heap]
+    
     def __bool__(self):
         return bool(self.heap)
 
@@ -455,6 +458,17 @@ class Simulation:
     
     def fill(self, order: Order, by: str, reason: str):
         return self.books[order.symbol].quote(Quote(by, order.price, order.quantity, reason))
+    
+    def get_my_orders(self):
+        orders = {}
+        for product, book in self.books.items():
+            for quote in book.buys.to_list() + book.buys.to_list():
+                if quote.by != "SUBMISSION":
+                    continue
+                if quote.reason not in orders:
+                    orders[quote.reason] = []
+                orders[quote.reason].append(Order(symbol=product, price=quote.price, quantity=quote.quantity))
+        return orders
 
 def get_trading_states_from_data(data_loc, days, use_p3=False, min_t=0, max_t=GLOBAL_MAX_TIMESTAMP, use_cache=True):
     base_listings = P3_LISTINGS if use_p3 else P4_LISTINGS
@@ -492,6 +506,7 @@ class Reaction(NamedTuple):
     input_state: TradingState # state seen by trader
     logs: Any # log string output by trader
     orders: dict[str, list[Order]] # map from reason to order
+    limit_orders: dict[str, list[Order]] # map from reason to limit order (non instant fill)
     trades: dict[str, list[Trade]] # map from reason to trade
 
 class MyP4Encoder(json.JSONEncoder):
@@ -555,8 +570,10 @@ def local_backtest(trader, trading_states: list[TradingState], use_p3=False, par
                     own_trades[order.symbol].append(trade)
                     direction = 1 if trade.buyer == "SUBMISSION" else -1
                     positions[order.symbol] += trade.quantity * direction
+        limit_orders = sim.get_my_orders()
         # Get Bot Orders Required for the Own Trades To Happen
         # (see which own_trades were not present in the order_depths)
+        # TODO: logic seems broken, fix
         original_buy_orders: dict[str, dict[int, int]] = {}
         original_sell_orders: dict[str, dict[int, int]] = {}
         bot_orders: list[tuple[Order, str]] = [] # orders and buyers
@@ -646,6 +663,7 @@ def local_backtest(trader, trading_states: list[TradingState], use_p3=False, par
             input_state=state,
             logs=logs,
             orders=orders,
+            limit_orders=limit_orders,
             trades=trades_by_reason,
         ))
         # Generate Next State
@@ -688,6 +706,7 @@ def real_backtest(trader, trading_states: list[TradingState], use_p3=False, para
                     own_trades[order.symbol].append(trade)
                     direction = 1 if trade.buyer == "SUBMISSION" else -1
                     positions[order.symbol] += trade.quantity * direction
+        limit_orders = sim.get_my_orders()
         # Get Bot Orders Required for the Own Trades To Happen
         # (see which own_trades were not present in the order_depths)
         original_buy_orders: dict[str, dict[int, int]] = {}
@@ -773,6 +792,7 @@ def real_backtest(trader, trading_states: list[TradingState], use_p3=False, para
             input_state=state,
             logs=logs,
             orders=orders,
+            limit_orders=limit_orders,
             trades=own_trades,
         ))
         # Generate Next State
@@ -885,13 +905,13 @@ def calculate_ema(l, window, multiplier, pad_front=None):
     return mas
 
 
-def gridsearch_parameters(trader, states: list[TradingState], parameters: dict[str, list[Any]], metric_fn: Callable[[list[Reaction]], Any], use_p3=False) -> list[tuple[Any, dict[str, Any]]]:
+def gridsearch_parameters(trader, trader_label: str, states: list[TradingState], parameters: dict[str, dict[str, list[Any]]], metric_fn: Callable[[list[Reaction]], Any], use_p3=False) -> list[tuple[Any, dict[str, Any]]]:
     """TODO: fix this"""
 
     results = []
-    combs = [dict(zip(parameters.keys(), comb)) for comb in itertools.product(*parameters.values())]
+    combs = [dict(zip(parameters.keys(), comb)) for comb in itertools.product(*(parameters[trader_label].values()))]
     for comb in tqdm(combs):
-        reactions = local_backtest(trader, states, use_p3, parameters=comb, show_progress=False)
+        reactions = local_backtest(trader, states, use_p3, parameters={trader_label: comb}, show_progress=False)
         metric = metric_fn(reactions)
         results.append((metric, comb))
     return sorted(results, key=lambda x: x[0])

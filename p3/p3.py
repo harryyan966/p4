@@ -1,4 +1,4 @@
-from p3_utils import *
+from p3.p3_utils import *
 
 
 
@@ -176,8 +176,26 @@ def trade_basket2(sims: dict[str, Simulation], data_dict, parameters):
     logs["mean_premium"] = data.mean_premium
     return data.to_dict(), logs
 
-
-
+VOUCHERS_PARAMETERS = {
+    "impl_vol_curve": (3.8824381011776072, 0.017861876815434205, 0.010784410263898293),
+    "9500_thres": None,
+    "9750_thres": None,
+    "10000_thres": None,
+    "10250_thres": None,
+    "10500_thres": None, 
+    "TTE": 5,
+}
+class VouchersData:
+    def __init__(self, data_dict):
+        pass
+    def to_dict(self):
+        return {
+            
+        }
+def trade_vouchers(sims, data_dict, parameters):
+    # Ks = 
+    pass
+    
 
 
 

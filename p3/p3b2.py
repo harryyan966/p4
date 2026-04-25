@@ -2,7 +2,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 from utils import *
-from p3 import Trader, PARAMETERS
+from p3.p3 import Trader, PARAMETERS
 
 PLOT_MID = False
 PLOT_POSITION = True
