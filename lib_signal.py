@@ -35,6 +35,12 @@ def delta(S,K,TTE,sigma,r=0.0):
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * TTE) / (sigma * np.sqrt(TTE))
     return _norm_cdf(d1)
 
+# def theo_sigma_from_delta(S,K,TTE,d):
+#     return scipy.optimize.brentq(
+#         lambda sigma: delta(S, K, TTE, sigma) - d,
+#         1e-6, 10.0
+#     )
+
 # def fit_smile(S,TTE,V):
 #     "DEP"
 #     Ks = [9500, 9750, 10000, 10250, 10500]

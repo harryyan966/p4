@@ -79,7 +79,7 @@ class Picture:
                 l=lambda s,x,y:f"bid{i}({x},{y},{s[2]})",
                 color="green",
                 opacity=0.6-0.1*i)
-        if 1:self.add_cross(f"{product}_bot_trades",
+        if 0:self.add_cross(f"{product}_bot_trades",
             stuff=data.bot_trades(product),
             i=lambda t:t.timestamp//100,
             y=lambda t:t.price,
@@ -117,7 +117,7 @@ class BigPicture:
             hovermode="x",
             spikedistance=1,
             hoverdistance=1,
-            margin=go.layout.Margin(l=0,r=0,b=0,t=0)
+            margin=go.layout.Margin(l=0,r=0,b=70,t=0)
         )
         self.fig.update_xaxes(showspikes=True, spikesnap="cursor", spikemode="across", spikedash="solid")
         self.fig.update_yaxes(tickformat=",")

@@ -98,13 +98,13 @@ class P3Round3Data:
         def res(t,order_depth):
             b=sorted(order_depth.buy_orders.items())
             if len(b)<l:return None,None,None
-            return t//100,b[l-1][0],b[l-1][1]
+            return t//100,b[-l][0],b[-l][1]
         return self.cached(f"bid{l}({product})", lambda:[res(s.timestamp,s.order_depths.get(product, OrderDepth())) for s in self.states])
     def askl(self,product,l):
         def res(t,order_depth):
-            b=sorted(order_depth.sell_orders.items(),reverse=True)
+            b=sorted(order_depth.sell_orders.items())
             if len(b)<l:return None,None,None
-            return t//100,b[-l][0],-b[-l][1]
+            return t//100,b[l-1][0],-b[l-1][1]
         return self.cached(f"ask{l}({product})", lambda:[res(s.timestamp,s.order_depths.get(product, OrderDepth())) for s in self.states])
     def bot_trades(self,product):
         return self.cached(f"bot_trades({product})", lambda:[t for s in self.states for t in s.market_trades.get(product, [])])

@@ -1,35 +1,40 @@
 from lib_data import Round3DataBacktest
 from lib_plots import BigPicture, Picture, plotly_colors
-from lib_signal import ma,smile_pred_impl_vol,smile_pred_price,moneyness,impl_vol,fit,pred,prem
-from p4 import Trader
+from lib_signal import ma,smile_pred_impl_vol,smile_pred_price,moneyness,impl_vol,fit,pred,prem,delta
+from p4 import Trader,Ks
 data = Round3DataBacktest(Trader(), cached=True)
 
 
-# K=5300
-# product = data.V_product(K)
-product = data.S2_product()
-fig = BigPicture(3,900,share_x=True)
+# Ks = [5100,5200,5300,5400,5500]
+fig = BigPicture(len(Ks)+2,300*len(Ks),share_x=True)
 pic = Picture(
     data.timestamps(),
+    # data.S()
     data.zeros()
-    # ma(data.S2(), 4000)
-)
-pic.add_product_visualization(product, data)
-fig.add(pic,1)
-pic = Picture(
-    data.timestamps(),
-    # data.zeros(),
-    data.S2()
-    # ma(data.S2(), 4000)
 )
 pic.add_product_visualization(data.S_product(), data)
 fig.add(pic,2)
-pic = Picture(data.timestamps(),data.zeros())
-pic.add_line("pnl", data.pnl)
-pic.add_secondary_line("pos", data.pos(product))
-fig.add(pic,3)
+pnlpic = Picture(
+    data.timestamps(),
+    data.zeros(),
+)
+for Ki,K in enumerate(Ks):
+    product = data.V_product(K)
+    pic = Picture(
+        data.timestamps(),
+        # data.mid(product)
+        data.zeros()
+    )
+    pic.add_product_visualization(product, data)
+    pnlpic.add_secondary_line(f"{K}_pos", data.pos(product))
+    # pnlpic.add_secondary_line("delta", data.pos(product) * delta(data.S(),K,data.TTE(),sigma) + data.pos(data.S_product()))
+    fig.add(pic, 3+Ki)
+pnlpic.add_line("pnl", data.pnl)
+pnlpic.add_secondary_line("S_pos", data.pos(data.S_product()))
+sigma = 0.0125
+fig.add(pnlpic,1)
 
-print(len(data.own_buys(product)))
-print(len(data.own_sells(product)))
+# print("V_trades: ", len(data.own_buys(product)) +len(data.own_sells(product)))
+# print("S_trades: ", len(data.own_buys(data.S_product())) +len(data.own_sells(data.S_product())))
 
 fig.show()

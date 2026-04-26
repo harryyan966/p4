@@ -2,7 +2,8 @@ from datamodel import TradingState, Symbol, Order, OrderDepth
 import json
 from typing import Callable, Any
 import numpy as np
-import scipy
+import math
+# import scipy
 SILENCE_EXCEPTIONS = False
 Ks = [4000, 4500, 5000, 5100, 5200, 5300, 5400, 5500, 6000, 6500]
 P4_POSITION_LIMITS = {
@@ -197,45 +198,283 @@ class MovingAverageData:
 class Math:
     @staticmethod
     def _norm_cdf(x):
-        return 0.5 * (1.0 + scipy.special.erf(x / np.sqrt(2.0)))
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+    
     @staticmethod
-    def price(S,K,TTE,sigma,r=0.0):
-        sqrt_T = np.sqrt(TTE)
-        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * TTE) / (sigma * sqrt_T)
+    def price(S, K, TTE, sigma, r=0.0):
+        sqrt_T = math.sqrt(TTE)
+        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * TTE) / (sigma * sqrt_T)
         d2 = d1 - sigma * sqrt_T
-        return S * Math._norm_cdf(d1) - K * np.exp(-r * TTE) * Math._norm_cdf(d2)
+        return S * Math._norm_cdf(d1) - K * math.exp(-r * TTE) * Math._norm_cdf(d2)
+    
     @staticmethod
-    def impl_vol(V,S,K,TTE,r=0.0,tol=1e-6):
-        return scipy.optimize.brentq(lambda sigma: Math.price(S, K, TTE, sigma, r) - V, 1e-6, 10.0, xtol=tol)
+    def impl_vol(V, S, K, TTE, r=0.0, tol=1e-6):
+        lo, hi = 1e-6, 10.0
+        for _ in range(100):
+            mid = (lo + hi) / 2
+            if Math.price(S, K, TTE, mid, r) - V > 0:
+                hi = mid
+            else:
+                lo = mid
+            if hi - lo < tol:
+                break
+        return (lo + hi) / 2
+    
     @staticmethod
-    def delta(S,K,TTE,sigma,r=0.0):
-        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * TTE) / (sigma * np.sqrt(TTE))
+    def delta(S, K, TTE, sigma, r=0.0):
+        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * TTE) / (sigma * math.sqrt(TTE))
         return Math._norm_cdf(d1)
 
-
-class ExpectedPositionData:
-    pass
-
+LOCAL = True
+DAY = 0 if LOCAL else 3
 
 
+# class Math:
+#     @staticmethod
+#     def _norm_cdf(x):
+#         return 0.5 * (1.0 + scipy.special.erf(x / np.sqrt(2.0)))
+#     @staticmethod
+#     def price(S,K,TTE,sigma,r=0.0):
+#         sqrt_T = np.sqrt(TTE)
+#         d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * TTE) / (sigma * sqrt_T)
+#         d2 = d1 - sigma * sqrt_T
+#         return S * Math._norm_cdf(d1) - K * np.exp(-r * TTE) * Math._norm_cdf(d2)
+#     @staticmethod
+#     def impl_vol(V,S,K,TTE,r=0.0,tol=1e-6):
+#         return scipy.optimize.brentq(lambda sigma: Math.price(S, K, TTE, sigma, r) - V, 1e-6, 10.0, xtol=tol)
+#     @staticmethod
+#     def delta(S,K,TTE,sigma,r=0.0):
+#         d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * TTE) / (sigma * np.sqrt(TTE))
+#         return Math._norm_cdf(d1)
+class FillForwardData:
+    def __init__(self, id, trader_data):
+        self.key = f"FillForwardData({id})"
+        self.trader_data = trader_data
+        self.data = self.trader_data.get(self.key, None)
+    def update(self, data):
+        if data is not None:
+            self.data = data
+        self.settle()
+        return self.data
+    def settle(self):
+        self.trader_data[self.key] = self.data
 
 
-def bet_gamma(timestamp, sims: dict[str, Simulation], trader_data, parameters):
-    """Maintains a variable gamma exposure = delta * const"""
-    sigma = 0.0186 # optimize, currently using historical realized vol
-    max_allowed_delta = 0.4 # optimize, higher means i short more of the underlying, 
 
-    expected_S_position = -V_position_limit * max_allowed_delta
-    if S_position > expected_S_position:
-        sell_S(expected_V_position-expected_V_position)
-    S_delta = S_position
-    expected_V_position = (-S_position) / delta
-    if V_position > expected_V_position:
-        if V_best_bid > threshold:
-            sell_V(expected_V_position-expected_V_position)
-    elif V_position < expected_V_position:
-        if V_best_ask < threshold:
-            buy_V(expected_V_position-expected_V_position)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# def bet_S_with_delta(timestamp, sims: dict[str, Simulation], trader_data, parameters):
+#     """Trade S mean reversion with delta of arbitrary K"""
+#     start_day = 0
+#     S = sims["VELVETFRUIT_EXTRACT"]
+#     K = 5300
+#     V = sims[f"VEV_{K}"]
+#     TTE = (8-start_day) - (timestamp / 10000_00)
+
+#     sigma = 0.0186 # optimize (ma?), currently using fitted implied vol of the strike
+#     S_price = FillForwardData("sp", trader_data).update(S.strict_wall_mid())
+#     if S_price is None:
+#         return "no stock price"
+    
+#     delta = Math.delta(S_price,K,TTE,sigma)
+#     prev_delta = FillForwardData(f"d({K})", trader_data).update(None)
+#     if prev_delta is None:
+#         prev_delta = FillForwardData(f"d({K})", trader_data).update(delta)
+#     if abs(delta-prev_delta) > 3:
+#         if S.position > expected_S_position:
+#             S.take_all_bids("adjust S", max_q=S.position-expected_S_position)
+#         elif S.position < expected_S_position:
+#             S.take_all_asks("adjust S", max_q=expected_S_position-S.position)
+#     return "success"
+
+
+
+
+
+# def bet_gamma_hedge_S(timestamp, sims: dict[str, Simulation], trader_data, parameters):
+#     """Maintains a constant gamma exposure"""
+#     start_day = 0
+#     S = sims["VELVETFRUIT_EXTRACT"]
+#     TTE = (8-start_day) - (timestamp / 10000_00)
+
+#     S_price = FillForwardData("sp", trader_data).update(S.strict_wall_mid())
+#     if S_price is None:
+#         return "no stock price"
+#     expected_S_position = 120
+#     exposed_delta = S.position - 120
+#     for K in [5300]:
+#         V = sims[f"VEV_{K}"]
+#         sigma = 0.0125 # optimize (ma?), currently using fitted implied vol of the strike
+#         expected_V_position = V.position_limit
+#         # V.take_best_ask("the V exposure", max_q=expected_V_position-V.position)
+#         V_position = expected_V_position
+    
+#         delta = Math.delta(S_price,K,TTE,sigma)
+#         exposed_delta += V_position * delta
+#         expected_S_position += -V_position * delta
+#     if abs(exposed_delta) > 15:
+#         if S.position > expected_S_position:
+#             S.take_all_bids("adjust S", max_q=S.position-expected_S_position)
+#         elif S.position < expected_S_position:
+#             S.take_all_asks("adjust S", max_q=expected_S_position-S.position)
+#     return "success"
+
+
+
+
+
+
+def bet_gamma_hedge_S(timestamp, sims: dict[str, Simulation], trader_data, parameters):
+    """sell when up, buy when down"""
+    S = sims["VELVETFRUIT_EXTRACT"]
+    S_price = FillForwardData("sp", trader_data).update(S.strict_wall_mid())
+    if S_price is None:
+        return "no stock price"
+    S_delta = Math.delta(S_price,5200,8-DAY-(timestamp//10000_00),0.0125)
+    last_traded_S_delta = FillForwardData("ltsp", trader_data).data
+    if last_traded_S_delta is None:
+        last_traded_S_delta = FillForwardData("ltsp", trader_data).update(S_delta)
+        FillForwardData("dir", trader_data).update(0)
+    direction = FillForwardData("dir", trader_data).data
+    if abs(S_delta-last_traded_S_delta) > 0.05:
+        FillForwardData("ltsp", trader_data).update(S_delta)
+        direction_change = (last_traded_S_delta-S_delta)*1000
+        # new_direction = -1 if S_delta > last_traded_S_delta else 1
+        direction = FillForwardData("dir", trader_data).update(direction + direction_change)
+    expected_S_pos = max(-S.position_limit,min(S.position_limit,int(direction * S.position_limit)))
+    if S.position > expected_S_pos:
+        S.take_all_bids("take S", max_q=S.position-expected_S_pos)
+    elif S.position < expected_S_pos:
+        S.take_all_asks("take S", max_q=expected_S_pos-S.position)
+    traded_Ks = [5000,5100,5200,5300,5400,5500]
+    for K in traded_Ks:
+        V = sims[f"VEV_{K}"]
+        expected_V_pos = int(direction * V.position_limit)
+        if V.position > expected_V_pos:
+            V.take_all_bids("take V", max_q=V.position-expected_V_pos)
+        elif V.position < expected_V_pos:
+            V.take_all_asks("take V", max_q=expected_V_pos-V.position)
+    return "success"
+
+
+def hydrogel(timestamp, sims: dict[str, Simulation], trader_data, parameters):
+    """sell when up, buy when down"""
+    S = sims["HYDROGEL_PACK"]
+    S_price = FillForwardData("sp", trader_data).update(S.strict_wall_mid())
+    if S_price is None:
+        return "no stock price"
+    last_traded_S_price = FillForwardData("ltsp", trader_data).data
+    if last_traded_S_price is None:
+        last_traded_S_price = FillForwardData("ltsp", trader_data).update(S_price)
+        FillForwardData("dir", trader_data).update(0)
+    direction = FillForwardData("dir", trader_data).data
+    if abs(S_price-last_traded_S_price) > 39:
+        FillForwardData("ltsp", trader_data).update(S_price)
+        direction_change = (last_traded_S_price-S_price)/40
+        # new_direction = -1 if S_delta > last_traded_S_delta else 1
+        direction = FillForwardData("dir", trader_data).update(direction + direction_change)
+    expected_S_pos = max(-S.position_limit,min(S.position_limit,int(direction * S.position_limit)))
+    if S.position > expected_S_pos:
+        S.take_all_bids("take S", max_q=S.position-expected_S_pos)
+    elif S.position < expected_S_pos:
+        S.take_all_asks("take S", max_q=expected_S_pos-S.position)
+    return "success"
+
+
+
+
+# def hydrogel_c(timestamp, sims: dict[str, Simulation], trader_data, parameters):
+#     """Maintains a constant gamma exposure"""
+#     S = sims["HYDROGEL_PACK"]
+#     S_price = FillForwardData("sp", trader_data).update(S.strict_wall_mid())
+#     prev_prices = FillForwardData("pps", trader_data).data
+#     if prev_prices is None:
+#         FillForwardData("dir", trader_data).update(0)
+#         prev_prices = FillForwardData("pps", trader_data).update([])
+#     prev_prices = FillForwardData("pps", trader_data).update([*prev_prices,S_price][-100:])
+#     if not prev_prices:
+#         return "no stock price"
+#     prev_min = prev_prices[0]
+#     if S_price-prev_min>30:
+#         FillForwardData("dir", trader_data).update(-1)
+#     prev_max = prev_prices[0]
+#     if prev_max-S_price>30:
+#         FillForwardData("dir", trader_data).update(1)
+#     direction = FillForwardData("dir", trader_data).data
+#     expected_S_pos = direction * S.position_limit
+#     if S.position > expected_S_pos:
+#         S.take_all_bids("adjust S", max_q=S.position-expected_S_pos)
+#     elif S.position < expected_S_pos:
+#         S.take_all_asks("adjust S", max_q=expected_S_pos-S.position)
+#     return "success"
+
+
+
+# def bet_gamma_hedge_V(timestamp, sims: dict[str, Simulation], trader_data, parameters):
+#     """Maintains a variable gamma exposure = delta * const"""
+#     start_day = 0
+#     S = sims["VELVETFRUIT_EXTRACT"]
+#     K = 5300
+#     V = sims[f"VEV_{K}"]
+#     TTE = (8-start_day) - (timestamp / 10000_00)
+
+#     sigma = 0.0125 # optimize (ma?), currently using fitted implied vol of the strike
+#     min_allowed_delta = 0.15 # optimize, supporting lower deltas means less position
+#     expected_S_position = -V.position_limit * min_allowed_delta
+#     S.take_all_bids("the S hedge", max_q=S.position-expected_S_position)
+
+#     S_price = FillForwardData("sp", trader_data).update(S.strict_wall_mid())
+#     if S_price is None:
+#         return "no stock price"
+    
+#     S_delta = S.position
+#     delta = Math.delta(S_price,K,TTE,sigma)
+#     update = (-S_delta) / delta
+#     expected_V_position = FillForwardData(f"evp({K})", trader_data).update(update)
+#     if expected_V_position is None:
+#         return "no expected position"
+#     # if timestamp % 100_00 == 0:
+    
+#     if V.position > expected_V_position:
+#         # V.ask(V.best_ask()-1, V.position-expected_V_position, "adjust V")
+#         V.take_all_bids("adjust V", max_q=V.position-expected_V_position)
+#     elif V.position < expected_V_position:
+#         # V.bid(V.best_bid()+1, expected_V_position-V.position, "adjust V")
+#         V.take_all_asks("adjust V", max_q=expected_V_position-V.position)
+#     return "success"
+
+
+# Pseudocode
+# def bet_gamma(timestamp, sims: dict[str, Simulation], trader_data, parameters):
+#     """Maintains a variable gamma exposure = delta * const"""
+#     sigma = 0.0125 # optimize (ma?), currently using fitted implied vol of the strike
+#     min_allowed_delta = 0.15 # optimize, supporting lower deltas means less available position
+#     expected_S_position = -V_position_limit / min_allowed_delta
+#     if S_position > expected_S_position:
+#         if V_best_bid > threshold:
+#             sell_S(expected_V_position-expected_V_position)
+#     S_delta = S_position
+#     delta = Math.delta(S,K,TTE,sigma)
+#     expected_V_position = (-S_delta) / delta
+#     if V_position > expected_V_position:
+#         if V_best_bid > threshold:
+#             sell_V(V_position-expected_V_position)
+#     elif V_position < expected_V_position:
+#         if V_best_ask < threshold:
+#             buy_V(expected_V_position-V_position)
     
 
 
@@ -260,6 +499,11 @@ def bet_gamma(timestamp, sims: dict[str, Simulation], trader_data, parameters):
 
 
 RUNNERS = [
+    # ("bet_mean_reversion_S", bet_mean_reversion_S)
+    ("bet_gamma_hedge_S", bet_gamma_hedge_S),
+    # ("hydrogel", hydrogel)
+    # ("mean_reversion_S", mean_reversion_S)
+    # ("bet_gamma_hedge_V", bet_gamma_hedge_V)
     # ("hydrogel", hydrogel),
     # ("velvet_fruit", velvet_fruit),
     # ("vol_arb_5400", vol_arb_5400),
@@ -298,4 +542,3 @@ class Trader:
                 submitted_orders[order.symbol].append(order)
         print(json.dumps(logs, cls=MyP4Encoder))
         return submitted_orders, conversion, json.dumps(new_trader_data, cls=MyP4Encoder)
-    
